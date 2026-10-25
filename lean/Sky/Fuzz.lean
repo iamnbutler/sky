@@ -1,22 +1,26 @@
 import Sky.Claims
 import Cairn.Fuzz.Rng
+import Cairn.Fuzz.Text
 
 /-! # Sky on `cairn fuzz`'s host
 
-`cairn fuzz` presses Sky's buttons (sign in, load more, refresh, sign out) and plays the host:
+`cairn fuzz` types in Sky's fields, presses its buttons (sign in, load more, refresh, sign out, the
+app-password link) and plays the host:
 replies late, in any order, to cancelled and stray ids, failing (Cairn's docs/fuzz.md). The
 server is cairn_atproto's fake PDS (`CairnAtproto.Fake`, cairn#208): a timeline that only grows at
 its head, `getTimeline` paged by an opaque cursor, access tokens that expire, refreshes refused,
 a missing Keychain item by the session's phase, and faults. No network, no real account. The
-saved service Sky reads at launch (`readDefault`) is the fake's, or none.
+service default Sky reads at launch (`readDefault`) is the fake's, or none; the saved account
+(`readFile`) is the fake's identifier, or none.
 
 Cairn 0.2.5's hook keeps no state between replies, so each reply is what the fake answers in a
 state drawn at random that fits request `id`: the timeline as it stands then (`lengthAt`),
 growing as ids grow, and post `k` (from the oldest) the same whenever it is answered.
 
-Sky's sign-in form is empty until #210 adds its fields, so the fuzz plays a person who typed the
-fake's identifier and app password three times in four (`typed`): it hands the fake the
-`createSession` body with them. The fourth time the fake refuses the sign-in (401).
+The fuzz types into the sign-in form (`edits`): mostly the fake's identifier, app password and
+service, sometimes a wrong password, the password appended to what is there (after the text
+the fuzzer plants in the secure field, which must never reach an effect unredacted), an empty
+service, or Cairn's random editing script.
 
 Every claim is checked after every step: ^22, ^24, ^25 are decidable and checked as states;
 ^20–^23 also as relations on the feed each step reaches, against the fake's timeline; ^24 against
@@ -36,14 +40,24 @@ def readService : Gen Reply := do
   if ← Gen.chance 3 4 then return .bytes cfg.service.toUTF8
   return .failed .notFound "No value."
 
-/-- A `createSession` as if the person typed the fake's test identifier and app password
-(generated from the seed; not a credential), three times in four. -/
-def typed : Request → Gen Request
-  | r@(.http m url hs _ t) => do
-    if (url.splitOn nsidCreateSession).length > 1 && (← Gen.chance 3 4) then
-      return .http m url hs (createSession cfg.service cfg.identifier cfg.password).body.toUTF8 t
-    return r
-  | r => pure r
+/-- The account Sky saved, or none. -/
+def readAccount : Gen Reply := do
+  if ← Gen.chance 3 4 then return .bytes (accountJson cfg.service cfg.identifier)
+  return .failed .notFound "No such file."
+
+/-- What a person types: the fake's test identifier, app password and service (generated from
+the seed; not credentials), mostly. -/
+def typeIdentifier : Gen (List TextOp) :=
+  Gen.weighted [(6, pure [.selectAll, .insert cfg.identifier]), (1, pure [.selectAll, .insert ("@" ++ cfg.identifier)]),
+                (1, Cairn.Fuzz.Text.script)]
+
+def typePassword : Gen (List TextOp) :=
+  Gen.weighted [(12, pure [.selectAll, .insert cfg.password]), (2, pure [.insert cfg.password]),
+                (1, pure [.selectAll, .insert "not-the-password"]), (1, Cairn.Fuzz.Text.script)]
+
+def typeService : Gen (List TextOp) :=
+  Gen.weighted [(6, pure [.selectAll, .insert cfg.service]), (1, pure [.selectAll, .deleteBackward]),
+                (1, Cairn.Fuzz.Text.script)]
 
 /-- The index `k` of a post of the fake's timeline, from its URI's record key (`rkey`). -/
 def indexOf (i : FeedItem) : Option Nat :=
@@ -108,8 +122,11 @@ open Cairn Cairn.Fuzz
 def fuzz : Cairn.Fuzz.Custom State where
   replies := fun s id r => match r with
     | .readDefault _ "service" => some FakeCheck.readService
+    | .readFile _ => some FakeCheck.readAccount
+    | .writeFile .. | .deleteFile _ | .openItem _ | .forgetSecret _ => some do
+      if ← Gen.chance 1 10 then return .failed .other "The fuzz's host failed it."
+      return .done
     | _ => some do
-      let r ← FakeCheck.typed r
       match CairnAtproto.Fake.replies FakeCheck.cfg { phase := fun s => some s.session.phase } s id r with
       | some g => g
       | none => return .failed .other "not the fake's"
@@ -120,8 +137,13 @@ def fuzz : Cairn.Fuzz.Custom State where
       (23, fun t => FakeCheck.race t.after.feed (FakeCheck.lengthOf t.after)),
       (24, fun t => decide (Inv t.after)),
       (25, fun t => decide (SignedOutEmpty t.after)) ]
+  edits := fun _ id => match id with
+    | 6 => some FakeCheck.typeIdentifier
+    | 7 => some FakeCheck.typePassword
+    | 8 => some FakeCheck.typeService
+    | _ => none
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
-    s.session.inflight.isEmpty && s.session.held.isEmpty && !s.booting)]
+    s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty)]
 
 end Sky

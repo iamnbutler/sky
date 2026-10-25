@@ -41,26 +41,40 @@ def cancels (s : State) (c : Cmd) : List Nat :=
     | .cancelRequest id => some id
     | _ => none
 
-/- Launched with a saved service: resume (refreshSession, request 0), signed in, the head
-(request 2, 30 posts of 100). -/
+def bootId : Nat := ownId 0
+def accountId : Nat := ownId 1
+
+/- Launched with a service default and a saved account: the handle filled in, resume
+(refreshSession, request 0), signed in, the account saved (request 5), the head (request 2, 30
+posts of 100). -/
 def resumed : State :=
-  run initial [reply bootId (.bytes service.toUTF8), reply 0 sessionReply,
-               reply 2 (pageReply (page 100 30 none))]
+  run initial [reply bootId (.bytes service.toUTF8), reply accountId (.bytes (accountJson service cfg.identifier)),
+               reply 0 sessionReply, reply 2 (pageReply (page 100 30 none)), reply 5 .done]
 
 #guard initial.waiting == [bootId]
-#guard (requests initial (reply bootId (.bytes service.toUTF8))).map (·.1) == [0]
+#guard (requests initial (reply bootId (.bytes service.toUTF8))).isEmpty
+#guard (initial.step (reply bootId (.bytes service.toUTF8))).2.any fun
+  | .request 3 (.readFile p) => p == accountPath
+  | _ => false
+#guard (requests (run initial [reply bootId (.bytes service.toUTF8)]) (reply accountId (.bytes (accountJson service cfg.identifier)))).map (·.1) == [0]
 #guard live resumed.session
+#guard resumed.identifier.textString == cfg.identifier
 #guard idxs resumed == (List.range 30).map (99 - ·)
 #guard resumed.feed.cursor == cur 70 && !resumed.feed.atEnd
 #guard resumed.waiting == []
 
-/- No saved service: signed out, nothing sent. -/
-#guard let s := run initial [reply bootId (.failed .notFound "")]
-  s.session.phase == .launched && s.waiting == [] && canSignIn s.session
+/- No saved account: signed out, nothing sent, the service from the default. -/
+def fresh : State := run initial [reply bootId (.bytes service.toUTF8), reply accountId (.failed .notFound "")]
+#guard fresh.session.phase == .launched && fresh.waiting == [] && canSignIn fresh.session
+#guard serviceOf fresh == service
+/- No default either: bsky.social. -/
+#guard serviceOf (run initial [reply bootId (.failed .notFound ""), reply accountId (.failed .notFound "")]) == defaultService
 
-/- A missing Keychain item at resume: signed out. -/
-#guard let s := run initial [reply bootId (.bytes service.toUTF8), reply 0 (.failed .notFound "No Keychain item")]
-  !live s.session && s.feed == {} && s.waiting == []
+/- A missing Keychain item at resume: signed out, both items forgotten, the handle filled in. -/
+#guard let s := run initial [reply bootId (.bytes service.toUTF8),
+    reply accountId (.bytes (accountJson service cfg.identifier)), reply 0 (.failed .notFound "No Keychain item")]
+  !live s.session && s.feed == {} && s.waiting == [4, 2] && s.identifier.textString == cfg.identifier &&
+    s.problem == some "Your session ended. Sign in again."
 
 /- Load more: from the cursor; appended. -/
 def more : State := run resumed [.loadMore]
@@ -103,20 +117,57 @@ def racing : State := run resumed [.refresh, .loadMore]
 #guard let s := run more [reply 4 (err 400 "ExpiredToken" "expired"), reply 6 (err 400 "ExpiredToken" "revoked")]
   !live s.session && s.feed == {} && s.session.held == [] && s.session.inflight == []
 
-/- Sign out with a load-more in flight: cancelled, the feed emptied. -/
+/- Sign out with a load-more in flight: cancelled, both items forgotten, the account deleted. -/
 #guard cancels more .signOut == [4]
+#guard (more.step .signOut).2.any fun | .request _ (.forgetSecret i) => i == accessItem | _ => false
+#guard (more.step .signOut).2.any fun | .request _ (.forgetSecret i) => i == refreshItem | _ => false
+#guard (more.step .signOut).2.any fun | .request _ (.deleteFile p) => p == accountPath | _ => false
 #guard let s := run more [.signOut]
-  s.session.phase == .signedOut && s.feed == {} && s.waiting == []
+  s.session.phase == .signedOut && s.feed == {} && s.waiting.length == 3
 
-/- Sign in: the password is sent once and not kept. -/
-#guard let s := run initial [reply bootId (.failed .notFound ""), .signIn]
-  s.login.password == "" && s.waiting == [0]
-#guard let s := run initial [reply bootId (.failed .notFound ""), .signIn, reply 0 (err 401 "AuthenticationRequired" "no")]
-  s.session.phase == .signedOut && (s.problem.getD "").startsWith "Couldn't sign in"
+/- The form: Sign in is enabled only with both fields typed in. -/
+def typed : State := run fresh [.editIdentifier (.insert cfg.identifier), .editPassword (.insert cfg.password)]
+#guard !ready fresh
+#guard !ready (run fresh [.editIdentifier (.insert cfg.identifier)])
+#guard !ready (run fresh [.editPassword (.insert cfg.password)])
+#guard ready typed
+#guard (typed.step .signIn).2.length == 2
+/- Sign in: the password is sent once, redacted, and the field emptied in the same step. -/
+#guard (typed.step .signIn).2.all fun
+  | .request 0 r => r.redact && contains (String.fromUTF8! (match r with | .http _ _ _ b .. => b | _ => .empty)) cfg.password
+  | .setTimer n _ => n == slowTimer
+  | _ => false
+#guard let s := run typed [.signIn]
+  s.password.field.text == [] && s.waiting == [0] && !ready s && signingIn s.session
+/- Enter in the handle field moves on to the password. -/
+#guard (typed.step .nextField).2.length == 1
+/- A leading @ is dropped. -/
+#guard identifierOf (run fresh [.editIdentifier (.insert ("@" ++ cfg.identifier))]) == cfg.identifier
 
-/- Signing out while signing in: the sign-in stays outstanding (so the session can forget its
-tokens), and nothing else. -/
-#guard let s := run initial [reply bootId (.failed .notFound ""), .signIn, .signOut]
-  s.waiting == [0] && !canSignIn s.session
+/- Refused, in words. -/
+def refused (r : Reply) : Option String := (run typed [.signIn, reply 0 r]).problem
+#guard refused (err 401 "AuthenticationRequired" "Invalid identifier or password") == some wrongPassword
+#guard refused (err 401 "AuthFactorTokenRequired" "A sign in code has been sent") == some authFactor
+#guard refused (err 429 "RateLimitExceeded" "Rate Limit Exceeded") == some rateLimited
+#guard refused (.failed .network "The Internet connection appears to be offline.") == some offline
+#guard (run typed [.signIn, reply 0 (err 401 "AuthenticationRequired" "no")]).session.phase == .signedOut
+
+/- Signed in by the form: the account saved, then the head. -/
+#guard let s := run typed [.signIn]
+  ((s.step (reply 0 sessionReply)).2.any fun | .request _ (.writeFile p _) => p == accountPath | _ => false) &&
+  live (run s [reply 0 sessionReply]).session
+
+/- Cancelling a sign-in: it stays outstanding (so the session can forget its tokens). -/
+#guard let s := run typed [.signIn, .signOut]
+  s.waiting.contains 0 && !canSignIn s.session
+
+/- Cancel is offered only once the sign-in has taken a while. -/
+#guard let s := run typed [.signIn]
+  !offerCancel s && (s.step .signIn).1.slow == false && offerCancel (run s [.msg (.timer slowTimer)])
+#guard (run typed [.signIn]).step .signIn |>.2.isEmpty
+#guard ((typed.step .signIn).2.any fun | .setTimer n _ => n == slowTimer | _ => false)
+
+/- The link opens Bluesky's page. -/
+#guard (fresh.step .openHelp).2.any fun | .request _ (.openItem u) => u == appPasswordsUrl | _ => false
 
 end Sky.Tests

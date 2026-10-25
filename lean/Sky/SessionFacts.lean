@@ -10,7 +10,8 @@ session has dropped (claim ^24):
 
 * `step_ridsOk`: the requests in flight have distinct ids, all below `next` (`RidsOk`).
 * `step_kept`: a call the session has taken on (in flight or held for a refresh) is still taken
-  on after the step, or the step answers it. -/
+  on after the step, or the step answers it, unless the step is a `cancel`.
+* `cancel_fst`: a cancel drops exactly the calls it names. -/
 
 @[expose] public section
 
@@ -56,6 +57,25 @@ theorem answered_answerAll {ps : List Pending} {a : Answer} {i : Nat} (h : i ∈
   exact ⟨a, by simp only [answerAll, List.mem_append, List.mem_map]; exact Or.inl (Or.inr ⟨p, hp, rfl⟩)⟩
 
 /-! ## Each part of a step -/
+
+theorem cancel_fst (s : Session.State) (ids : List Nat) :
+    (step s (.cancel ids)).1 = { s with inflight := s.inflight.filter (fun x => x.2.id ∉ ids),
+                                        held := s.held.filter (fun p => p.id ∉ ids) } := rfl
+
+theorem cancel_snd (s : Session.State) (ids : List Nat) :
+    (step s (.cancel ids)).2 = (s.inflight.filter (fun x => x.2.id ∈ ids)).map fun x => .cancel x.1 := rfl
+
+/-- Cancelling every call taken on leaves none. -/
+theorem cancel_all (s : Session.State) :
+    (step s (.cancel (pids s))).1 = { s with inflight := [], held := [] } := by
+  rw [cancel_fst]
+  congr 1
+  · rw [List.filter_eq_nil_iff]; intro x hx
+    have : x.2.id ∈ pids s := List.mem_append_left _ (List.mem_map_of_mem (f := (·.2.id)) hx)
+    simpa using this
+  · rw [List.filter_eq_nil_iff]; intro p hp
+    have : p.id ∈ pids s := List.mem_append_right _ (List.mem_map_of_mem (f := (·.id)) hp)
+    simpa using this
 
 theorem forgetBoth_fst (s : Session.State) :
     (forgetBoth s).1 = { s with next := s.next + 2 } := rfl
@@ -267,6 +287,9 @@ theorem step_ridsOk {s : Session.State} (h : RidsOk s) (i : Input) : RidsOk (ste
   | signOut =>
     simp only [step]
     exact ridsOk_of h rfl (by simp [forgetBoth])
+  | cancel ids =>
+    simp only [step]
+    exact ridsOk_filter h _ rfl (Nat.le_refl _)
   | reply rid r =>
     simp only [step]
     split
@@ -278,9 +301,15 @@ theorem step_ridsOk {s : Session.State} (h : RidsOk s) (i : Input) : RidsOk (ste
       · exact onCallReply_ridsOk h _ _
     · exact onCallReply_ridsOk h _ _
 
-theorem step_kept {s : Session.State} (h : RidsOk s) (i : Input) :
+/-- An input that isn't `cancel`: it drops no call unanswered. -/
+def NotCancel : Input → Prop
+  | .cancel _ => False
+  | _ => True
+
+theorem step_kept {s : Session.State} (h : RidsOk s) (i : Input) (hc : NotCancel i) :
     Kept s (step s i).1 (step s i).2 := by
   cases i with
+  | cancel ids => exact hc.elim
   | signIn host idn pw =>
     simp only [step]
     split

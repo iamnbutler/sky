@@ -1,13 +1,23 @@
 # claims.lock: every claim id ever issued. Written by `lake exe ledger update`; never edit by hand.
 # id	kind	status	statement	title
 1	place	active	-	Sky window
-2	move	active	ba7d8b90a8b037f7	Sign in
+2	move	retired	ba7d8b90a8b037f7	Sign in
 3	move	active	d237a538a4f6fb20	Load more
 4	move	active	f4d7067707b2a3d2	Refresh
-5	move	active	161725456253d644	Sign out
+5	move	retired	161725456253d644	Sign out
+6	move	active	5928a27bfa96792b	Type your handle or email
+7	move	active	6be3a9a690ed133c	Type your app password
+8	move	active	4e1c8868d4fcefe9	Type the service
+9	move	active	f46dd4d0ede92eb8	What's an app password?
+10	move	active	e8985a9abb7a20f9	Sign in
+11	move	active	d5046f2a54bfb39f	Sign out
+12	move	active	9fb8586bc04301cb	Cancel signing in
+13	move	active	b97aa26476e6e4c4	Account
 20	invariant	active	41facd6a71c257b3	The feed is a run of the timeline
 21	invariant	active	5ab8697de51482ac	A stale page changes nothing
 22	invariant	active	91606c3835166fce	The cursor is never lost
 23	invariant	active	ad3e14c80604f156	A refresh racing a load-more
 24	invariant	active	62815f3f0fb3326f	Requests in flight are accounted for
 25	invariant	active	3efa62dad23fd6a2	Signed out, nothing shown or in flight
+26	invariant	active	ac99b103d9a655ae	The password reaches one request
+27	invariant	active	4a44c424ddf0f802	Signed out, no secret
