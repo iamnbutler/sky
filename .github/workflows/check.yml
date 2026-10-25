@@ -1,0 +1,56 @@
+# make check on GitHub's macOS 27 image (Xcode 27), building against the registry as a person
+# would: Lake fetches Cairn, cairn_json and cairn_atproto from https://cairn.registry.nexthub.sh, SwiftPM clones
+# Cairn's host from its git mirror. No secrets.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchains
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          sudo xcode-select -s /Applications/Xcode_27.app
+          swift --version
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache Lean and Swift builds
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            lean/.lake
+            .build
+          key: build-${{ runner.os }}-${{ hashFiles('lean/lean-toolchain', 'lean/lake-manifest.json', 'Package.resolved') }}
+          restore-keys: build-${{ runner.os }}-
+
+      - name: make check
+        run: make check FUZZ_ITERATIONS=100
+
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check
+          path: |
+            build/fuzz
+            build/size/*.md
+            build/size/*.json
+            build/claims.json
+          if-no-files-found: ignore
