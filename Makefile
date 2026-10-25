@@ -23,9 +23,11 @@ build: cairn-tool
 # The headless check runs with a home of its own (build/home), so it never reads a saved service
 # or touches the network.
 HOME_TEST = $(CURDIR)/build/home
+# cairn_atproto's fake PDS (Bun), which the selftest runs on 127.0.0.1 and stops.
+FAKE_PDS = lean/.lake/packages/cairn_atproto/tools/fake-pds/server.ts
 
 selftest: build
-	rm -rf $(HOME_TEST) && mkdir -p $(HOME_TEST) && CFFIXED_USER_HOME=$(HOME_TEST) swift run Sky --selftest
+	rm -rf $(HOME_TEST) && mkdir -p $(HOME_TEST) && CFFIXED_USER_HOME=$(HOME_TEST) swift run Sky --selftest $(FAKE_PDS) --shots build/shots
 
 # The Lean side alone. `cairn build` turns Lake's artifact cache on, which keeps .olean files out
 # of the build directory, and the ledger and audit import from there: turn it off.

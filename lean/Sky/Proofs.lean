@@ -236,16 +236,22 @@ theorem Q.tail {s : State} {o : Out} {rest : List Out} (h : Q (o :: rest) s)
       · exact Or.inr (answered_tail ha fun a e' => (ho r a e').2 r e rfl)
     · trivial
 
+theorem withdraw_fst (ss : Session.State) (l : Nat) :
+    (withdraw ss l).1 = { ss with inflight := ss.inflight.filter (fun x => x.2.id ∉ [l]),
+                                  held := ss.held.filter (fun p => p.id ∉ [l]) } := cancel_fst ss [l]
+
 theorem pids_withdraw (ss : Session.State) (l : Nat) {x : Nat} (hx : x ∈ pids ss) (hl : x ≠ l) :
     x ∈ pids (withdraw ss l).1 := by
-  simp only [pids, withdraw, List.mem_append, List.mem_map, List.mem_filter, bne_iff_ne,
-    ne_eq] at hx ⊢
+  rw [withdraw_fst]
+  simp only [pids, List.mem_append, List.mem_map, List.mem_filter, List.mem_singleton,
+    decide_eq_true_eq] at hx ⊢
   rcases hx with ⟨y, hy, rfl⟩ | ⟨y, hy, rfl⟩
   · exact Or.inl ⟨y, ⟨hy, hl⟩, rfl⟩
   · exact Or.inr ⟨y, ⟨hy, hl⟩, rfl⟩
 
 theorem ridsOk_withdraw {ss : Session.State} (h : RidsOk ss) (l : Nat) :
-    RidsOk (withdraw ss l).1 := ridsOk_filter h _ rfl (Nat.le_refl _)
+    RidsOk (withdraw ss l).1 := by
+  rw [withdraw_fst]; exact ridsOk_filter h _ rfl (Nat.le_refl _)
 
 theorem onAnswer_Q {s : State} {id : Nat} {a : Answer} {rest : List Out}
     (h : Q (.answer id a :: rest) s) : Q rest (onAnswer s id a).1 := by
@@ -335,7 +341,10 @@ theorem handleOut_Q {s : State} {es : List Effect} {o : Out} {rest : List Out}
     (h : Q (o :: rest) s) : Q rest (handleOut (s, es) o).1 := by
   cases o with
   | send rid k ht => exact h.tail fun _ _ e => by cases e
-  | forget rid item => exact h.tail fun _ _ e => by cases e
+  | forget rid item =>
+    have h' := h.tail fun _ _ e' => by cases e'
+    exact ⟨h'.rids, h'.lm, h'.rf, h'.dis, h'.cur⟩
+  | cancel rid => exact h.tail fun _ _ e => by cases e
   | answer id a => exact onAnswer_Q h
   | event e =>
     have h' := h.tail fun _ _ e' => by cases e'
@@ -387,16 +396,17 @@ theorem drive_inv {s : State} {i : Session.Input} (hr : RidsOk s.session)
   apply handleOuts_inv
   exact ⟨step_ridsOk hr i, lmOk_mono hp hl, rfOk_mono hp hf, hd, hc⟩
 
-theorem pending_of {s : State} {i : Session.Input} (hr : RidsOk s.session) (x : Nat)
-    (h : x ∈ pids s.session ∨ (∃ c, i = .call x c) ∧ live s.session = true) :
+theorem pending_of {s : State} {i : Session.Input} (hr : RidsOk s.session) (hc : NotCancel i)
+    (x : Nat) (h : x ∈ pids s.session ∨ (∃ c, i = .call x c) ∧ live s.session = true) :
     x ∈ pids (Session.step s.session i).1 ∨ Answered x (Session.step s.session i).2 := by
   rcases h with hm | ⟨⟨c, rfl⟩, hlive⟩
-  · exact step_kept hr _ x hm
+  · exact step_kept hr _ hc x hm
   · exact Or.inl (call_taken hlive x c)
 
 /-- Driving the session from a state that keeps `Inv` (any input but a new call). -/
-theorem drive_inv_of {s : State} (h : Inv s) (i : Session.Input) : Inv (drive s i).1 :=
-  drive_inv h.rids (pending_of h.rids) (lmOk_mono (fun _ hx => Or.inl hx) h.lm)
+theorem drive_inv_of {s : State} (h : Inv s) (i : Session.Input) (hc : NotCancel i) :
+    Inv (drive s i).1 :=
+  drive_inv h.rids (pending_of h.rids hc) (lmOk_mono (fun _ hx => Or.inl hx) h.lm)
     (rfOk_mono (fun _ hx => Or.inl hx) h.rf) h.dis h.cur
 
 theorem live_withdraw (ss : Session.State) (l : Nat) : live (withdraw ss l).1 = live ss := rfl
@@ -406,7 +416,7 @@ theorem startRefresh_core {s : State} (h : Inv s) (hlive : live s.session = true
     Inv (drive { s with session := ss, nextCall := s.nextCall + 1,
                         feed := { s.feed with loadMore := none, refresh := some s.nextCall } }
       (.call s.nextCall (Call.getTimeline (some pageSize)))).1 :=
-  drive_inv hr (pending_of hr) (by simp [LmOk])
+  drive_inv hr (pending_of hr trivial) (by simp [LmOk])
     (by simp only [RfOk]; exact ⟨Or.inr ⟨⟨_, rfl⟩, hl.trans hlive⟩, Nat.lt_succ_self _⟩)
     (by simp [Distinct]) (fun a b => h.cur a b)
 
@@ -431,7 +441,7 @@ theorem startLoadMore_inv {s : State} (h : Inv s) : Inv (startLoadMore s).1 := b
     show Inv (drive { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) } } (.call s.nextCall (Call.getTimeline (some pageSize) (some c)))).1
     apply drive_inv
     · exact h.rids
-    · exact pending_of h.rids
+    · exact pending_of h.rids trivial
     · simp only [LmOk]
       exact ⟨Or.inr ⟨⟨_, rfl⟩, hlive⟩, hcur, hne, Nat.lt_succ_self _⟩
     · have hr := h.rf
@@ -449,67 +459,118 @@ theorem startLoadMore_inv {s : State} (h : Inv s) : Inv (startLoadMore s).1 := b
     · exact h.cur
   · exact h
 
-theorem driveSession_inv {s : State} (h : Inv s) (i : Session.Input) :
+theorem driveSession_inv {s : State} (h : Inv s) (i : Session.Input) (hc : NotCancel i) :
     Inv (driveSession s i).1 := by
   unfold driveSession
   try dsimp only
   split
-  · exact startRefresh_inv (drive_inv_of h i)
-  · exact drive_inv_of h i
+  · exact startRefresh_inv (drive_inv_of h i hc)
+  · exact drive_inv_of h i hc
 
-theorem inv_login {s : State} (h : Inv s) (l : Login) (p : Option String) :
-    Inv { s with login := l, problem := p } := ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
+/-- `Inv` reads only the session, the feed and the call ids. -/
+theorem Inv.other {s t : State} (h : Inv s) (e1 : t.session = s.session) (e2 : t.feed = s.feed)
+    (e3 : t.nextCall = s.nextCall) : Inv t := by
+  obtain ⟨a, b, c, d, f⟩ := h
+  cases t; cases s; simp only at e1 e2 e3; subst e1 e2 e3
+  exact ⟨a, b, c, d, f⟩
+
+theorem sendOwn_inv {s : State} (h : Inv s) (k : Own) (r : Request) : Inv (sendOwn s k r).1 :=
+  h.other rfl rfl rfl
 
 theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   cases c with
   | signIn =>
     simp only [step0, signIn]
     split
-    · exact driveSession_inv (inv_login h _ _) _
+    · refine driveSession_inv ?_ _ trivial; exact h.other rfl rfl rfl
     · exact h
   | loadMore => exact startLoadMore_inv h
   | refresh => exact startRefresh_inv h
-  | signOut => exact driveSession_inv (inv_login h _ _) _
+  | signOut =>
+    simp only [step0, signOut]
+    refine sendOwn_inv (driveSession_inv ?_ .signOut trivial) _ _; exact h.other rfl rfl rfl
+  | editIdentifier op => exact h.other rfl rfl rfl
+  | editPassword op => exact h.other rfl rfl rfl
+  | editService op => exact h.other rfl rfl rfl
+  | nextField => exact h
+  | toggleAccount => exact h.other rfl rfl rfl
+  | openHelp => exact sendOwn_inv h _ _
   | msg m =>
     simp only [step0]
     cases m with
     | reply id r =>
       simp only [receive0]
       split
-      · simp only [onBoot]
-        have hb : Inv { s with booting := false } := ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
-        split
-        · split
-          · try dsimp only
-            split
+      · next k _ =>
+        have hb : Inv { s with own := s.own.filter (·.1 != id) } := h.other rfl rfl rfl
+        cases k with
+        | readService =>
+          simp only [onReadService]
+          exact sendOwn_inv (by split <;> (try split) <;> (try split) <;> exact hb.other rfl rfl rfl) _ _
+        | readAccount =>
+          simp only [onReadAccount]
+          split
+          · split
+            · dsimp only; refine driveSession_inv ?_ (.resume _) trivial; exact hb.other rfl rfl rfl
             · exact hb
-            · apply driveSession_inv; exact ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
           · exact hb
-        · exact hb
+        | save => exact hb
+        | delete => exact hb
+        | openHelp => exact hb
       · split
-        · exact driveSession_inv h _
+        · refine driveSession_inv ?_ _ trivial; exact h.other rfl rfl rfl
         · exact h
+    | timer n =>
+      simp only [receive0]
+      split
+      · exact h.other rfl rfl rfl
+      · exact h
     | _ => exact h
 
+theorem settle_fst (s : State) :
+    (settle s).1 = if live s.session then s
+      else { s with feed := {}, session := { s.session with inflight := [], held := [] } } := by
+  unfold settle; split <;> simp_all [cancel_all]
+
 theorem settle_inv {s : State} (h : Inv s) : Inv (settle s).1 := by
-  unfold settle
+  rw [settle_fst]
   split
   · exact h
   · exact ⟨⟨by simp, by simp⟩, by simp [LmOk], by simp [RfOk], by simp [Distinct], cursorKept_empty⟩
 
 theorem settle_signedOut (s : State) : SignedOutEmpty (settle s).1 := by
-  unfold settle
+  rw [settle_fst]
   split
   · next hl => intro h; simp_all
   · intro _; exact ⟨rfl, rfl, rfl⟩
 
+theorem step1_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step1 s c).1 := settle_inv (step0_inv h c)
+
+/-- Every command but sign in and the password's edits runs blind. -/
+theorem step_blind (s : State) (c : Cmd) (h1 : c ≠ .signIn) (h2 : ∀ op, c ≠ .editPassword op) :
+    s.step c = ({ (step1 s.blank c).1 with password := s.password }, (step1 s.blank c).2) := by
+  cases c with
+  | signIn => exact absurd rfl h1
+  | editPassword op => exact absurd rfl (h2 op)
+  | _ => rfl
+
+theorem step_cases (s : State) (c : Cmd) :
+    s.step c = step1 s c ∨
+      s.step c = ({ (step1 s.blank c).1 with password := s.password }, (step1 s.blank c).2) := by
+  cases c
+  case signIn => exact Or.inl rfl
+  case editPassword => exact Or.inl rfl
+  all_goals exact Or.inr rfl
+
 theorem step_inv {s : State} (h : Inv s) (c : Cmd) : Inv (s.step c).1 := by
-  simp only [State.step]
-  exact settle_inv (step0_inv h c)
+  rcases step_cases s c with e | e <;> rw [e]
+  · exact step1_inv h c
+  · exact (step1_inv (s := s.blank) (h.other rfl rfl rfl) c).other rfl rfl rfl
 
 theorem step_signedOut (s : State) (c : Cmd) : SignedOutEmpty (s.step c).1 := by
-  simp only [State.step]
-  exact settle_signedOut _
+  rcases step_cases s c with e | e <;> rw [e]
+  · exact settle_signedOut _
+  · exact settle_signedOut _
 
 theorem inv_initial : Inv initial :=
   ⟨ridsOk_init, by simp [LmOk, initial], by simp [RfOk, initial], by simp [Distinct, initial],
@@ -518,16 +579,16 @@ theorem inv_initial : Inv initial :=
 
 /-! ## What a move does (the moves' posts) -/
 
-/-- What every output leaves alone: the sign-in form, the call ids, the session's phase. -/
+/-- What every output leaves alone: the password field, the call ids, the session's phase. -/
 structure Same (s s' : State) : Prop where
-  login : s'.login = s.login
+  password : s'.password = s.password
   nextCall : s'.nextCall = s.nextCall
   phase : s'.session.phase = s.session.phase
 
 theorem Same.refl (s : State) : Same s s := ⟨rfl, rfl, rfl⟩
 
 theorem Same.trans {a b c : State} (h1 : Same a b) (h2 : Same b c) : Same a c :=
-  ⟨h2.login.trans h1.login, h2.nextCall.trans h1.nextCall, h2.phase.trans h1.phase⟩
+  ⟨h2.password.trans h1.password, h2.nextCall.trans h1.nextCall, h2.phase.trans h1.phase⟩
 
 theorem onAnswer_same (s : State) (id : Nat) (a : Answer) : Same s (onAnswer s id a).1 := by
   unfold onAnswer
@@ -550,7 +611,8 @@ theorem onAnswer_same (s : State) (id : Nat) (a : Answer) : Same s (onAnswer s i
 theorem handleOut_same (acc : State × List Effect) (o : Out) : Same acc.1 (handleOut acc o).1 := by
   cases o with
   | send => exact Same.refl _
-  | forget => exact Same.refl _
+  | forget => exact ⟨rfl, rfl, rfl⟩
+  | cancel => exact Same.refl _
   | answer id a => exact onAnswer_same _ _ _
   | event e => cases e <;> first | exact ⟨rfl, rfl, rfl⟩ | (rename_i x; cases x <;> exact ⟨rfl, rfl, rfl⟩)
 
@@ -559,6 +621,7 @@ theorem handleOut_quiet (acc : State × List Effect) (o : Out) (h : ∀ x a, o �
   cases o with
   | send => exact ⟨rfl, rfl⟩
   | forget => exact ⟨rfl, rfl⟩
+  | cancel => exact ⟨rfl, rfl⟩
   | answer id a => exact absurd rfl (h id a)
   | event e => cases e <;> first | exact ⟨rfl, rfl⟩ | (rename_i x; cases x <;> exact ⟨rfl, rfl⟩)
 
@@ -578,10 +641,10 @@ theorem foldl_quiet : ∀ (outs : List Out) (acc : State × List Effect),
     exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
 
 theorem drive_same (s : State) (i : Session.Input) :
-    (drive s i).1.login = s.login ∧ (drive s i).1.nextCall = s.nextCall ∧
+    (drive s i).1.password = s.password ∧ (drive s i).1.nextCall = s.nextCall ∧
       (drive s i).1.session.phase = (Session.step s.session i).1.phase := by
   have := foldl_same (Session.step s.session i).2 ({ s with session := (Session.step s.session i).1 }, [])
-  exact ⟨this.login, this.nextCall, this.phase⟩
+  exact ⟨this.password, this.nextCall, this.phase⟩
 
 /-- A call with a live session puts out no answer, and leaves it live. -/
 theorem call_quiet {ss : Session.State} (h : live ss = true) (id : Nat) (c : Call) :
@@ -613,17 +676,26 @@ theorem drive_call {s : State} (h : live s.session = true) (id : Nat) (c : Call)
 theorem settle_live {s : State} (h : live s.session = true) : (settle s).1 = s := by
   simp [settle, h]
 
-theorem step_live {s : State} {c : Cmd} (h : live (step0 s c).1.session = true) :
-    (s.step c).1 = (step0 s c).1 := by
-  simp only [State.step]
-  exact settle_live h
+theorem step1_fst (s : State) (c : Cmd) : (step1 s c).1 = (settle (step0 s c).1).1 := rfl
 
-theorem settle_login (s : State) : (settle s).1.login = s.login := by
-  unfold settle; split <;> rfl
+theorem step1_live {s : State} {c : Cmd} (h : live (step0 s c).1.session = true) :
+    (step1 s c).1 = (step0 s c).1 := by
+  rw [step1_fst]; exact settle_live h
 
-/-- Load more, enabled: the items stay, and a load-more is in flight. -/
-theorem loadMore_post {s : State} (h : canLoadMore s = true) :
-    (s.step .loadMore).1.feed.items = s.feed.items ∧ (s.step .loadMore).1.feed.loadMore.isSome := by
+theorem settle_password (s : State) : (settle s).1.password = s.password := by
+  rw [settle_fst]; split <;> rfl
+
+theorem settle_phase (s : State) : (settle s).1.session.phase = s.session.phase := by
+  rw [settle_fst]; split <;> rfl
+
+theorem settle_identifier (s : State) : (settle s).1.identifier = s.identifier := by
+  rw [settle_fst]; split <;> rfl
+
+theorem settle_service (s : State) : (settle s).1.service = s.service := by
+  rw [settle_fst]; split <;> rfl
+
+theorem loadMore_post1 {s : State} (h : canLoadMore s = true) :
+    (step1 s .loadMore).1.feed.items = s.feed.items ∧ (step1 s .loadMore).1.feed.loadMore.isSome := by
   have hc : s.feed.cursor.isSome = true := by
     simp only [canLoadMore, Bool.and_eq_true] at h; exact h.2
   obtain ⟨c, hcur⟩ := Option.isSome_iff_exists.mp hc
@@ -633,8 +705,13 @@ theorem loadMore_post {s : State} (h : canLoadMore s = true) :
     simp only [step0, startLoadMore, h, hcur]
   have hd := drive_call (s := { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) } }) hlive s.nextCall (Call.getTimeline (some pageSize) (some c))
   rw [← e] at hd
-  rw [step_live hd.2.1, hd.1]
+  rw [step1_live hd.2.1, hd.1]
   exact ⟨rfl, rfl⟩
+
+/-- Load more, enabled: the items stay, and a load-more is in flight. -/
+theorem loadMore_post {s : State} (h : canLoadMore s = true) :
+    (s.step .loadMore).1.feed.items = s.feed.items ∧ (s.step .loadMore).1.feed.loadMore.isSome :=
+  loadMore_post1 (s := s.blank) h
 
 def canRefresh (s : State) : Bool := live s.session && s.feed.refresh.isNone
 
@@ -643,67 +720,94 @@ flight. -/
 def refreshFrom (s : State) (ss : Session.State) : State :=
   { s with session := ss, nextCall := s.nextCall + 1, feed := { s.feed with loadMore := none, refresh := some s.nextCall } }
 
-theorem refresh_post {s : State} (h : canRefresh s = true) :
-    (s.step .refresh).1.feed.items = s.feed.items ∧ (s.step .refresh).1.feed.loadMore = none ∧
-      (s.step .refresh).1.feed.refresh = some s.nextCall := by
+theorem refresh_post1 {s : State} (h : canRefresh s = true) :
+    (step1 s .refresh).1.feed.items = s.feed.items ∧ (step1 s .refresh).1.feed.loadMore = none ∧
+      (step1 s .refresh).1.feed.refresh = some s.nextCall := by
   have hlive : live s.session = true := by
     simp only [canRefresh, Bool.and_eq_true] at h; exact h.1
   simp only [canRefresh] at h
   have fin : ∀ ss, live ss = true →
       (step0 s .refresh).1 = (drive (refreshFrom s ss) (.call s.nextCall (Call.getTimeline (some pageSize)))).1 →
-      (s.step .refresh).1.feed.items = s.feed.items ∧ (s.step .refresh).1.feed.loadMore = none ∧
-        (s.step .refresh).1.feed.refresh = some s.nextCall := by
+      (step1 s .refresh).1.feed.items = s.feed.items ∧ (step1 s .refresh).1.feed.loadMore = none ∧
+        (step1 s .refresh).1.feed.refresh = some s.nextCall := by
     intro ss hl e
     have k := drive_call (s := refreshFrom s ss) hl s.nextCall (Call.getTimeline (some pageSize))
     rw [← e] at k
-    rw [step_live k.2.1, k.1]
+    rw [step1_live k.2.1, k.1]
     exact ⟨rfl, rfl, rfl⟩
   rcases hlm : s.feed.loadMore with _ | ⟨l, c⟩
   · exact fin s.session hlive (by simp only [step0, startRefresh, h, hlm]; rfl)
   · exact fin (withdraw s.session l).1 hlive (by simp only [step0, startRefresh, h, hlm]; rfl)
 
-theorem startRefresh_login (s : State) : (startRefresh s).1.login = s.login := by
-  unfold startRefresh
-  split
-  · rcases hlm : s.feed.loadMore with _ | ⟨l, c⟩
-    · exact (drive_same (refreshFrom s s.session) _).1
-    · exact (drive_same (refreshFrom s (withdraw s.session l).1) _).1
-  · rfl
+theorem refresh_post {s : State} (h : canRefresh s = true) :
+    (s.step .refresh).1.feed.items = s.feed.items ∧ (s.step .refresh).1.feed.loadMore = none ∧
+      (s.step .refresh).1.feed.refresh = some s.nextCall :=
+  refresh_post1 (s := s.blank) h
 
 theorem startRefresh_dead {s : State} (h : live s.session = false) : startRefresh s = (s, []) := by
   simp [startRefresh, h]
 
-theorem driveSession_login (s : State) (i : Session.Input) :
-    (driveSession s i).1.login = s.login := by
-  unfold driveSession
-  try dsimp only
-  split
-  · exact (startRefresh_login _).trans (drive_same s i).1
-  · exact (drive_same s i).1
+/-- A sign-in the session can take: it sends `createSession`, and nothing else. -/
+theorem signIn_step {ss : Session.State} (h : canSignIn ss = true) (host i p : String) :
+    Session.step ss (.signIn host i p) =
+      ({ ss with phase := .signingIn ss.next host, next := ss.next + 1 },
+       [.send ss.next .signIn (createSession host i p)]) := by
+  unfold canSignIn at h
+  simp only [Session.step]
+  split <;> simp_all
 
-/-- Sign in, enabled: the password is gone from the state once sent. -/
-theorem signIn_post {s : State} (h : canSignIn s.session = true) :
-    (s.step .signIn).1.login.password = "" := by
-  simp only [State.step]
-  rw [settle_login]
-  simp only [step0, signIn, h, ↓reduceIte]
-  rw [driveSession_login]
+/-- Sign in, enabled: the password field is emptied in the step that sends it, and a sign-in is
+in flight. -/
+theorem signIn_post {s : State} (h : ready s = true) :
+    (s.step .signIn).1.password = Text.SecureField.empty passwordHint ∧
+      signingIn (s.step .signIn).1.session = true := by
+  have hc : canSignIn s.session = true := by simp only [ready, Bool.and_eq_true] at h; exact h.2
+  let t : State := { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
+                            problem := none, accountOpen := false, slow := false }
+  let i : Session.Input := .signIn (serviceOf s) (identifierOf s) s.password.text
+  have e0 : (step0 s .signIn).1 = (drive t i).1 := by
+    simp only [step0, signIn, h, ↓reduceIte, driveSession]
+    rw [signIn_step hc]
+    simp [signedInEvent, t, i]
+  have hd := drive_same t i
+  show (settle (step0 s .signIn).1).1.password = _ ∧ signingIn (settle (step0 s .signIn).1).1.session = true
+  refine ⟨by rw [settle_password, e0]; exact hd.1, ?_⟩
+  have hp := settle_phase (step0 s .signIn).1
+  unfold signingIn
+  rw [hp, e0, hd.2.2]
+  show signingIn (Session.step s.session i).1 = true
+  rw [signIn_step hc]
+  rfl
 
 theorem signOut_phase (ss : Session.State) : (Session.step ss .signOut).1.phase = .signedOut := by
   simp [Session.step, forgetBoth]
 
-/-- Sign out: signed out, the feed empty. -/
-theorem signOut_post (s : State) :
-    (s.step .signOut).1.session.phase = .signedOut ∧ (s.step .signOut).1.feed = {} := by
+theorem signOut_post1 (s : State) :
+    (step1 s .signOut).1.session.phase = .signedOut ∧ (step1 s .signOut).1.feed = {} := by
   have hp : (step0 s .signOut).1.session.phase = .signedOut := by
-    simp only [step0, signOut, driveSession]
-    have hd : (drive { s with problem := none } .signOut).1.session.phase = .signedOut :=
+    show (driveSession { s with problem := none, accountOpen := false } .signOut).1.session.phase = .signedOut
+    simp only [driveSession]
+    have hd : (drive { s with problem := none, accountOpen := false } .signOut).1.session.phase = .signedOut :=
       (drive_same _ _).2.2.trans (signOut_phase _)
     split
     · rw [startRefresh_dead (by simp [live, hd])]; exact hd
     · exact hd
   have hl : live (step0 s .signOut).1.session = false := by simp [live, hp]
-  simp only [State.step, settle, hl]
-  exact ⟨hp, rfl⟩
+  rw [step1_fst, settle_fst]
+  simp only [hl, Bool.false_eq_true, ↓reduceIte]
+  exact ⟨hp, trivial⟩
+
+/-- Account, while signed in: the panel opens or closes, the feed stays. -/
+theorem toggleAccount_post {s : State} (h : live s.session = true) :
+    (s.step .toggleAccount).1.accountOpen = !s.accountOpen ∧ (s.step .toggleAccount).1.feed = s.feed := by
+  show (settle { s.blank with accountOpen := !s.accountOpen }).1.accountOpen = _ ∧
+    (settle { s.blank with accountOpen := !s.accountOpen }).1.feed = _
+  rw [settle_live (s := { s.blank with accountOpen := !s.accountOpen }) h]
+  exact ⟨rfl, rfl⟩
+
+/-- Sign out: signed out, the feed empty. -/
+theorem signOut_post (s : State) :
+    (s.step .signOut).1.session.phase = .signedOut ∧ (s.step .signOut).1.feed = {} :=
+  signOut_post1 s.blank
 
 end Sky

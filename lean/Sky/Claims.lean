@@ -7,17 +7,27 @@ meta import Cairn.Claims.Elab
 
 | Id | Kind | What |
 |---|---|---|
-| ^1 | place | the window (bare until #210) |
-| ^2 | move | Sign in |
+| ^1 | place | the window: the sign-in screen, or the feed |
+| ^2 | move | Sign in (retired: reissued as ^10) |
 | ^3 | move | Load more |
 | ^4 | move | Refresh |
-| ^5 | move | Sign out |
+| ^5 | move | Sign out (retired: reissued as ^11 and ^12) |
+| ^6 | move | the Handle or email field |
+| ^7 | move | the App password field (secure) |
+| ^8 | move | the Service field |
+| ^9 | move | What's an app password? (opens Bluesky's page) |
+| ^10 | move | Sign in: enabled exactly when both fields are typed in and no sign-in is in flight |
+| ^11 | move | Sign out, in the account panel |
+| ^12 | move | Cancel a sign-in or resume, offered once it has taken a few seconds |
+| ^13 | move | Account: open or close the account panel |
 | ^20 | invariant | the feed is a contiguous run of the server's timeline, in its order |
 | ^21 | invariant | a load-more page for a cursor the feed no longer holds changes nothing |
 | ^22 | invariant | the cursor is never lost |
 | ^23 | invariant | a refresh racing a load-more: either order, the same feed |
 | ^24 | invariant | at most one load-more and one refresh in flight; every call answered, cancelled or live |
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
+| ^26 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
+| ^27 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
 -/
 
 @[expose] public section
@@ -28,18 +38,11 @@ open Cairn Cairn.Claims CairnAtproto CairnAtproto.Session
 /-! ## Places -/
 
 place ^1 window "Sky window" where
-  does "Sky's window. Bare for now: who is signed in, what went wrong, a button for each thing you can do, and the first posts of the home feed."
+  does "Sky's window. Signed out, the sign-in screen: handle or email, app password, service, Sign in, and what went wrong. Signed in: who, Sign out, Load more, Refresh and the first posts of the home feed."
 
 /-! ## Moves -/
 
-move ^2 signInMove (s : State) "Sign in" in ^1 where
-  does "While signed out, press Sign in (with the service, handle and app password typed)."
-  sees "Sky signs in to the service; once signed in it loads the head of the home feed. A refused sign-in says why. The password is not kept."
-  enabled := canSignIn s.session
-  on press
-    emit := s.step .signIn
-    post s' := s'.login.password = ""
-    sound := by intro s h; exact signIn_post h
+retire ^2 move "Sign in" because "Sign in is enabled only with both fields typed in (cairn#210): reissued as ^10."
 
 move ^3 loadMoreMove (s : State) "Load more" in ^1 where
   does "With a feed that isn't at its end, press Load more."
@@ -59,39 +62,110 @@ move ^4 refreshMove (s : State) "Refresh" in ^1 where
     post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore = none ∧ s'.feed.refresh = some s.nextCall
     sound := by intro s h; exact refresh_post h
 
-move ^5 signOutMove (s : State) "Sign out" in ^1 where
-  does "While signed in or signing in, press Sign out."
-  sees "Sky signs out and forgets the session's tokens; the feed is emptied and every request it was waiting on is cancelled."
-  enabled := canSignOut s.session
+retire ^5 move "Sign out" because "Sign out moved into the account panel, and Cancel is its own move (cairn#210): reissued as ^11 and ^12."
+
+move ^6 typeIdentifier (s : State) "Type your handle or email" in ^1 where
+  does "While signed out, type in the Handle or email field, and press Enter."
+  sees "The text appears in the field; Enter moves on to the App password field."
+  enabled := !live s.session
+  on edit (op : TextOp)
+    emit := s.step (.editIdentifier op)
+    post s' := s'.identifier = (Text.Field.apply op s.identifier).1 ∧ s'.password = s.password
+    sound := by intro s op _; exact ⟨settle_identifier _, rfl⟩
+  on submit
+    emit := s.step .nextField
+    post s' := s'.identifier = s.identifier ∧ s'.password = s.password
+    sound := by intro s _; exact ⟨settle_identifier _, rfl⟩
+
+move ^7 typePassword (s : State) "Type your app password" in ^1 where
+  does "While signed out, type in the App password field, and press Enter."
+  sees "One bullet per character; copy, cut and undo beep. Enter signs in, as Sign in does, when it is enabled."
+  enabled := !live s.session
+  on edit (op : TextOp)
+    emit := s.step (.editPassword op)
+    post s' := s'.password = (Text.SecureField.apply op s.password).1 ∧ s'.identifier = s.identifier
+    sound := by intro s op _; exact ⟨settle_password _, settle_identifier _⟩
+  on submit
+    emit := s.step .signIn
+    post s' := ready s = true →
+      s'.password = Text.SecureField.empty passwordHint ∧ signingIn s'.session = true
+    sound := by intro s _ h; exact signIn_post h
+
+move ^8 typeService (s : State) "Type the service" in ^1 where
+  does "While signed out, type in the Service field (empty: https://bsky.social, or the default Sky reads at launch)."
+  sees "The text appears in the field; Sign in goes to that service."
+  enabled := !live s.session
+  on edit (op : TextOp)
+    emit := s.step (.editService op)
+    post s' := s'.service = (Text.Field.apply op s.service).1 ∧ s'.password = s.password
+    sound := by intro s op _; exact ⟨settle_service _, rfl⟩
+
+move ^9 appPasswordHelp (s : State) "What's an app password?" in ^1 where
+  does "While signed out, press What's an app password?"
+  sees "Bluesky's App Passwords settings page opens in the browser."
+  enabled := !live s.session
+  on press
+    emit := s.step .openHelp
+    post s' := s'.session.phase = s.session.phase ∧ s'.password = s.password
+    sound := by intro s _; exact ⟨settle_phase _, rfl⟩
+
+move ^10 signInMove (s : State) "Sign in" in ^1 where
+  does "Type a handle or email and an app password, and press Sign in. It is enabled exactly when both fields are typed in and no sign-in (or resume) is in flight."
+  sees "Sky sends the one createSession request (its body redacted in every tool), and the password field is empty from that step on. Signed in, it loads the head of the home feed; refused, it says why in words."
+  enabled := ready s
+  on press
+    emit := s.step .signIn
+    post s' := s'.password = Text.SecureField.empty passwordHint ∧ signingIn s'.session = true
+    sound := by intro s h; exact signIn_post h
+
+move ^11 signOutMove (s : State) "Sign out" in ^1 where
+  does "While signed in, open the account panel and press Sign out."
+  sees "Sky signs out: it forgets both Keychain items and the saved account, empties the feed and cancels every request it was waiting on. The sign-in screen shows, the handle still filled in."
+  enabled := live s.session && s.accountOpen
   on press
     emit := s.step .signOut
     post s' := s'.session.phase = .signedOut ∧ s'.feed = {}
     sound := by intro s _; exact signOut_post s
+
+move ^12 cancelSignIn (s : State) "Cancel signing in" in ^1 where
+  does "While Sky has been signing in or resuming the session for a few seconds, press Cancel."
+  sees "The sign-in screen is ready again. Whatever the cancelled request brings back is forgotten (both Keychain items), and until it does Sign in waits."
+  enabled := offerCancel s
+  on press
+    emit := s.step .signOut
+    post s' := s'.session.phase = .signedOut ∧ s'.feed = {}
+    sound := by intro s _; exact signOut_post s
+
+move ^13 accountMove (s : State) "Account" in ^1 where
+  does "While signed in, press Account (Done when it is open)."
+  sees "The account panel opens, with the handle, the service and Sign out; pressed again, it closes."
+  enabled := live s.session
+  on press
+    emit := s.step .toggleAccount
+    post s' := s'.accountOpen = !s.accountOpen ∧ s'.feed = s.feed
+    sound := by intro s h; exact toggleAccount_post h
 
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }
 
 /-! ## Invariants -/
 
-/-- Every move is a step of the model. -/
-theorem update_step (s : State) (a : Action) :
-    (machine.update s a).1 = s ∨ ∃ c, (machine.update s a).1 = (s.step c).1 := by
-  rcases dispatch_cases machine.moves s a with h0 | ⟨m, hm, h, hh, -, -, -, e⟩
-  · exact Or.inl (by rw [Machine.update, h0])
-  · rw [Machine.update, e]
-    simp only [machine, List.mem_cons, List.mem_nil_iff, or_false] at hm
-    rcases hm with rfl | rfl | rfl | rfl
-    all_goals simp only [signInMove, loadMoreMove, refreshMove, signOutMove] at hh
-    all_goals obtain rfl | hh := List.mem_cons.mp hh
-    all_goals first
-      | exact Or.inr ⟨_, rfl⟩
-      | exact absurd hh List.not_mem_nil
+/-- Every move is a step of the model, so a property every step keeps, every move keeps. -/
+theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
+    ∀ m ∈ machine.moves, m.Preserves P :=
+  Move.all_cons (loadMoreMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (refreshMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (typeIdentifier.preserves _ (fun s _ _ h => hp s _ h) fun s _ h => hp s _ h)
+  (Move.all_cons (typePassword.preserves _ (fun s _ _ h => hp s _ h) fun s _ h => hp s _ h)
+  (Move.all_cons (typeService.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (appPasswordHelp.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (signInMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (signOutMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (cancelSignIn.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (accountMove.preserves _ fun s _ h => hp s _ h) Move.all_nil)))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
-    (h : P s) : P (machine.update s a).1 := by
-  rcases update_step s a with e | ⟨c, e⟩
-  · rw [e]; exact h
-  · rw [e]; exact hp s c h
+    (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
 
 invariant ^20 contiguous "The feed is a run of the timeline" for machine where
   does "The feed is a contiguous run of the server's timeline, in its order: no post twice, none skipped. Stated against a timeline with no duplicates: a feed that is a run of it stays one when the next page is appended, when a head page puts new posts on top, and when a head page that doesn't reach the feed replaces it."
@@ -156,6 +230,20 @@ invariant ^25 signedOutEmpty "Signed out, nothing shown or in flight" for machin
   init := signedOut_initial
   step := fun s a h => update_inv (P := SignedOutEmpty) (fun s c _ => step_signedOut s c) s a h
   receive := fun s m _ => step_signedOut s (.msg m)
+
+invariant ^26 passwordOnce "The password reaches one request" for machine where
+  does "Every step but Sign in (the button, or Enter in the password field) has the same effects whatever the password field holds. Sign in's effects are the same too, for any password of the same length, once the redacted request's contents are blanked; with Sign in enabled its only request is createSession, carrying the password and marked redact, and the field is empty after. So the password is sent in exactly one request, and never shown by a tool (Cairn redacts it in dumps and logs; the fuzzer plants text in the field and checks)."
+  holds _s := PasswordSent
+  init := passwordSent
+  step := fun _ _ _ => passwordSent
+  receive := fun _ _ _ => passwordSent
+
+invariant ^27 signOutSecrets "Signed out, no secret" for machine where
+  does "Sign out's effects include forgetting both Keychain items (access and refresh). While signed out, no step sends a request carrying a Keychain secret."
+  holds _s := SignOutForgets ∧ SignedOutNoSecret
+  init := ⟨signOutForgets, signedOutNoSecret⟩
+  step := fun _ _ _ => ⟨signOutForgets, signedOutNoSecret⟩
+  receive := fun _ _ _ => ⟨signOutForgets, signedOutNoSecret⟩
 
 def claimInfos : List ClaimInfo := claims%
 

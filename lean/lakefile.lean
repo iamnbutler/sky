@@ -7,9 +7,9 @@ package sky where
     -- `weak.`: Lake passes it to every module, and only those that use the claim commands know it.
     ⟨`weak.cairn.claims.scope, "sky"⟩]
 
-require "iamnbutler" / "cairn" @ "^0.2.5"
+require "iamnbutler" / "cairn" @ "^0.3.0"
 require "iamnbutler" / "cairn_json" @ "^0.1.0"
-require "iamnbutler" / "cairn_atproto" @ "^0.1.1"
+require "iamnbutler" / "cairn_atproto" @ "^0.2.0"
 
 /-- The app: its exports (`Sky.Abi`) and everything they import from this package. -/
 @[default_target]
