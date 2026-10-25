@@ -1,0 +1,11 @@
+[package]
+name = "sky"
+version = "0.1.0"
+kind = "bin"
+license = "MIT"
+libs = ["Sky"]
+
+[dependencies]
+cairn = "^0.2.5"
+cairn_json = "^0.1.0"
+cairn_atproto = "^0.1.0"
