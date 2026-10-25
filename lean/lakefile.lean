@@ -1,14 +1,27 @@
 import Lake
 open Lake DSL
 
+/-- Sky on Cairn. The package name is the claim scope: Sky's claims are `sky^N`. -/
 package sky where
-  leanOptions := #[⟨`weak.cairn.claims.scope, "sky"⟩]
+  leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩,
+    -- `weak.`: Lake passes it to every module, and only those that use the claim commands know it.
+    ⟨`weak.cairn.claims.scope, "sky"⟩]
 
 require "iamnbutler" / "cairn" @ "^0.2.5"
 require "iamnbutler" / "cairn_json" @ "^0.1.0"
-require "iamnbutler" / "cairn_atproto" @ "^0.1.0"
+require "iamnbutler" / "cairn_atproto" @ "^0.1.1"
 
+/-- The app: its exports (`Sky.Abi`) and everything they import from this package. -/
 @[default_target]
 lean_lib Sky where
   roots := #[`Sky.Abi, `Sky]
   defaultFacets := #[LeanLib.staticFacet]
+
+/-- The app with its proofs and checks (`Checks.lean`): what the ledger, the axiom audit and the
+kernel replay read. Never linked into the app. -/
+@[default_target]
+lean_lib Checks
+
+/-- `lake exe fuzz` (`cairn fuzz`): Cairn's fuzzer on the app and a simulated host. -/
+lean_exe fuzz where
+  root := `FuzzMain

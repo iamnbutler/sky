@@ -1,1 +1,13 @@
+# claims.lock: every claim id ever issued. Written by `lake exe ledger update`; never edit by hand.
 # id	kind	status	statement	title
+1	place	active	-	Sky window
+2	move	active	ba7d8b90a8b037f7	Sign in
+3	move	active	d237a538a4f6fb20	Load more
+4	move	active	f4d7067707b2a3d2	Refresh
+5	move	active	161725456253d644	Sign out
+20	invariant	active	41facd6a71c257b3	The feed is a run of the timeline
+21	invariant	active	5ab8697de51482ac	A stale page changes nothing
+22	invariant	active	91606c3835166fce	The cursor is never lost
+23	invariant	active	ad3e14c80604f156	A refresh racing a load-more
+24	invariant	active	62815f3f0fb3326f	Requests in flight are accounted for
+25	invariant	active	3efa62dad23fd6a2	Signed out, nothing shown or in flight
