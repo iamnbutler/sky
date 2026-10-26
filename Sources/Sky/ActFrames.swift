@@ -125,7 +125,8 @@ final class ActFrames {
             byAuthor = t.authors(fm)
             let seen = byAuthor
             pick = t.actable(fm).compactMap({ k -> (UInt32, String)? in
-                guard let a = seen[k], a != me, a != seen[r.key], seen.values.filter({ $0 == a }).count >= 2 else { return nil }
+                let top = t.topRow(fm).flatMap { t.rowAuthors(fm)[$0] }
+                guard let a = seen[k], a != me, a != seen[r.key], a != top, seen.values.filter({ $0 == a }).count >= 2 else { return nil }
                 return (k, a)
             }).first
             if pick != nil { break }

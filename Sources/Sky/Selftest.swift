@@ -268,6 +268,24 @@ final class Selftest {
         for n in f.ax { if let c = n.control, c.claim == 32, n.label.hasPrefix("Post by ") { out[c.key] = String(n.label.dropFirst(8)) } }
         return out
     }
+    /// The key of the topmost row with anything showing in the list (its post, toggles or ⋯):
+    /// the row the runtime keeps still.
+    func topRow(_ f: Frame) -> UInt32? {
+        guard let l = listRect(f) else { return nil }
+        return f.ax.filter { n in
+            guard let c = n.control, [32, 37, 38, 52].contains(c.claim) else { return false }
+            return n.rect.h > 0 && n.rect.y + n.rect.h > l.y && n.rect.y < l.y + l.h
+        }.min { $0.rect.y < $1.rect.y }?.control?.key
+    }
+    /// Each row's author, from its ⋯ ("More for @handle's post"), by key.
+    func rowAuthors(_ f: Frame) -> [UInt32: String] {
+        var out: [UInt32: String] = [:]
+        for n in f.ax { if let c = n.control, c.claim == 52, n.label.hasPrefix("More for "), n.label.hasSuffix("'s post") {
+            out[c.key] = String(n.label.dropFirst(9).dropLast(7))
+        } }
+        return out
+    }
+
     /// Rows whose Like and ⋯ are wholly inside the list, top first.
     func actable(_ f: Frame) -> [UInt32] {
         guard let l = listRect(f) else { return [] }
@@ -411,7 +429,8 @@ final class Selftest {
             byAuthor = authors(fr)
             let seen = byAuthor
             pick = actable(fr).compactMap({ k -> (UInt32, String)? in
-                guard let a = seen[k], a != me, a != seen[r.key], seen.values.filter({ $0 == a }).count >= 2 else { return nil }
+                let top = topRow(fr).flatMap { rowAuthors(fr)[$0] }
+            guard let a = seen[k], a != me, a != seen[r.key], a != top, seen.values.filter({ $0 == a }).count >= 2 else { return nil }
                 return (k, a)
             }).first
             if pick != nil { break }
