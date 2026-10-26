@@ -438,7 +438,7 @@ theorem startLoadMore_inv {s : State} (h : Inv s) : Inv (startLoadMore s).1 := b
     simp only [canLoadMore, Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
       Option.isNone_iff_eq_none] at hcan
     obtain ⟨⟨⟨⟨hlive, hlm⟩, hne⟩, _⟩, _⟩ := hcan
-    show Inv (drive { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) } } (.call s.nextCall (Call.getTimeline (some pageSize) (some c)))).1
+    show Inv (drive { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) }, moreFailed := false } (.call s.nextCall (Call.getTimeline (some pageSize) (some c)))).1
     apply drive_inv
     · exact h.rids
     · exact pending_of h.rids trivial
@@ -477,6 +477,29 @@ theorem Inv.other {s t : State} (h : Inv s) (e1 : t.session = s.session) (e2 : t
 theorem sendOwn_inv {s : State} (h : Inv s) (k : Own) (r : Request) : Inv (sendOwn s k r).1 :=
   h.other rfl rfl rfl
 
+theorem loadSources_core : ∀ (s : State) (srcs : List String),
+    (loadSources s srcs).1.session = s.session ∧ (loadSources s srcs).1.feed = s.feed ∧
+      (loadSources s srcs).1.nextCall = s.nextCall ∧ (loadSources s srcs).1.password = s.password ∧
+      (loadSources s srcs).1.rows = s.rows
+  | _, [] => ⟨rfl, rfl, rfl, rfl, rfl⟩
+  | s, src :: rest => by
+    simp only [loadSources]
+    split
+    · exact loadSources_core _ rest
+    · exact loadSources_core s rest
+
+theorem appearRow_core (s : State) (k : Nat) :
+    (appearRow s k).1.session = s.session ∧ (appearRow s k).1.feed = s.feed ∧
+      (appearRow s k).1.nextCall = s.nextCall ∧ (appearRow s k).1.password = s.password ∧
+      (appearRow s k).1.rows = s.rows := by
+  unfold appearRow
+  split
+  · exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  · exact loadSources_core _ _
+
+theorem appearRow_inv {s : State} (h : Inv s) (k : Nat) : Inv (appearRow s k).1 :=
+  h.other (appearRow_core s k).1 (appearRow_core s k).2.1 (appearRow_core s k).2.2.1
+
 theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   cases c with
   | signIn =>
@@ -495,6 +518,13 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   | nextField => exact h
   | toggleAccount => exact h.other rfl rfl rfl
   | openHelp => exact sendOwn_inv h _ _
+  | appearRow k => exact appearRow_inv h k
+  | openPost k =>
+    simp only [step0, Sky.openPost]
+    split
+    · exact sendOwn_inv h _ _
+    · exact h
+  | showNew => exact h.other rfl rfl rfl
   | msg m =>
     simp only [step0]
     cases m with
@@ -517,15 +547,19 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
         | save => exact hb
         | delete => exact hb
         | openHelp => exact hb
+        | openPost => exact hb
       · split
         · refine driveSession_inv ?_ _ trivial; exact h.other rfl rfl rfl
-        · exact h
+        · split
+          · exact h.other rfl rfl rfl
+          · exact h
     | timer n =>
       simp only [receive0]
       split
       · exact h.other rfl rfl rfl
       · exact h
-    | _ => exact h
+    | clock t => exact h.other rfl rfl rfl
+    | sub sb e => cases e <;> first | exact h.other rfl rfl rfl | exact h
 
 theorem settle_fst (s : State) :
     (settle s).1 = if live s.session then s
@@ -544,7 +578,47 @@ theorem settle_signedOut (s : State) : SignedOutEmpty (settle s).1 := by
   · next hl => intro h; simp_all
   · intro _; exact ⟨rfl, rfl, rfl⟩
 
-theorem step1_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step1 s c).1 := settle_inv (step0_inv h c)
+/-- `tidy` changes only the rows, the list's generation, the new posts, the load-more's failure
+and the images. -/
+theorem tidy_shape (s : State) : ∃ r g f m im,
+    (tidy s).1 = { s with rows := r, gen := g, fresh := f, moreFailed := m, images := im } := by
+  unfold tidy restart
+  split
+  · split
+    · exact ⟨s.rows, s.gen, s.fresh, s.moreFailed, s.images, rfl⟩
+    · split
+      · exact ⟨_, s.gen, _, s.moreFailed, s.images, rfl⟩
+      · exact ⟨_, _, _, _, _, rfl⟩
+    · split
+      · exact ⟨_, _, _, _, _, rfl⟩
+      · exact ⟨_, s.gen, s.fresh, s.moreFailed, s.images, rfl⟩
+    · exact ⟨_, _, _, _, _, rfl⟩
+  · exact ⟨_, s.gen, _, _, _, rfl⟩
+
+structure Core (s t : State) : Prop where
+  session : t.session = s.session
+  feed : t.feed = s.feed
+  nextCall : t.nextCall = s.nextCall
+  password : t.password = s.password
+  identifier : t.identifier = s.identifier
+  service : t.service = s.service
+  accountOpen : t.accountOpen = s.accountOpen
+
+theorem tidy_core (s : State) : Core s (tidy s).1 := by
+  obtain ⟨r, g, f, m, im, e⟩ := tidy_shape s
+  rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem tidy_inv {s : State} (h : Inv s) : Inv (tidy s).1 :=
+  h.other (tidy_core s).session (tidy_core s).feed (tidy_core s).nextCall
+
+theorem tidy_signedOut {s : State} (h : SignedOutEmpty s) : SignedOutEmpty (tidy s).1 := by
+  unfold SignedOutEmpty at *
+  rw [(tidy_core s).session, (tidy_core s).feed]; exact h
+
+theorem step1_fst (s : State) (c : Cmd) : (step1 s c).1 = (tidy (settle (step0 s c).1).1).1 := rfl
+
+theorem step1_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step1 s c).1 := by
+  rw [step1_fst]; exact tidy_inv (settle_inv (step0_inv h c))
 
 /-- Every command but sign in and the password's edits runs blind. -/
 theorem step_blind (s : State) (c : Cmd) (h1 : c ≠ .signIn) (h2 : ∀ op, c ≠ .editPassword op) :
@@ -569,8 +643,9 @@ theorem step_inv {s : State} (h : Inv s) (c : Cmd) : Inv (s.step c).1 := by
 
 theorem step_signedOut (s : State) (c : Cmd) : SignedOutEmpty (s.step c).1 := by
   rcases step_cases s c with e | e <;> rw [e]
-  · exact settle_signedOut _
-  · exact settle_signedOut _
+  · rw [step1_fst]; exact tidy_signedOut (settle_signedOut _)
+  · show SignedOutEmpty (step1 s.blank c).1
+    rw [step1_fst]; exact tidy_signedOut (settle_signedOut _)
 
 theorem inv_initial : Inv initial :=
   ⟨ridsOk_init, by simp [LmOk, initial], by simp [RfOk, initial], by simp [Distinct, initial],
@@ -676,11 +751,9 @@ theorem drive_call {s : State} (h : live s.session = true) (id : Nat) (c : Call)
 theorem settle_live {s : State} (h : live s.session = true) : (settle s).1 = s := by
   simp [settle, h]
 
-theorem step1_fst (s : State) (c : Cmd) : (step1 s c).1 = (settle (step0 s c).1).1 := rfl
-
 theorem step1_live {s : State} {c : Cmd} (h : live (step0 s c).1.session = true) :
-    (step1 s c).1 = (step0 s c).1 := by
-  rw [step1_fst]; exact settle_live h
+    Core (step0 s c).1 (step1 s c).1 := by
+  rw [step1_fst, settle_live h]; exact tidy_core _
 
 theorem settle_password (s : State) : (settle s).1.password = s.password := by
   rw [settle_fst]; split <;> rfl
@@ -694,6 +767,20 @@ theorem settle_identifier (s : State) : (settle s).1.identifier = s.identifier :
 theorem settle_service (s : State) : (settle s).1.service = s.service := by
   rw [settle_fst]; split <;> rfl
 
+theorem step1_password (s : State) (c : Cmd) : (step1 s c).1.password = (step0 s c).1.password := by
+  rw [step1_fst, (tidy_core _).password, settle_password]
+
+theorem step1_phase (s : State) (c : Cmd) :
+    (step1 s c).1.session.phase = (step0 s c).1.session.phase := by
+  rw [step1_fst, (tidy_core _).session, settle_phase]
+
+theorem step1_identifier (s : State) (c : Cmd) :
+    (step1 s c).1.identifier = (step0 s c).1.identifier := by
+  rw [step1_fst, (tidy_core _).identifier, settle_identifier]
+
+theorem step1_service (s : State) (c : Cmd) : (step1 s c).1.service = (step0 s c).1.service := by
+  rw [step1_fst, (tidy_core _).service, settle_service]
+
 theorem loadMore_post1 {s : State} (h : canLoadMore s = true) :
     (step1 s .loadMore).1.feed.items = s.feed.items ∧ (step1 s .loadMore).1.feed.loadMore.isSome := by
   have hc : s.feed.cursor.isSome = true := by
@@ -701,11 +788,11 @@ theorem loadMore_post1 {s : State} (h : canLoadMore s = true) :
   obtain ⟨c, hcur⟩ := Option.isSome_iff_exists.mp hc
   have hlive : live s.session = true := by
     simp only [canLoadMore, Bool.and_eq_true] at h; exact h.1.1.1.1
-  have e : step0 s .loadMore = drive { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) } } (.call s.nextCall (Call.getTimeline (some pageSize) (some c))) := by
+  have e : step0 s .loadMore = drive { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) }, moreFailed := false } (.call s.nextCall (Call.getTimeline (some pageSize) (some c))) := by
     simp only [step0, startLoadMore, h, hcur]
-  have hd := drive_call (s := { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) } }) hlive s.nextCall (Call.getTimeline (some pageSize) (some c))
+  have hd := drive_call (s := { s with nextCall := s.nextCall + 1, feed := { s.feed with loadMore := some (s.nextCall, c) }, moreFailed := false }) hlive s.nextCall (Call.getTimeline (some pageSize) (some c))
   rw [← e] at hd
-  rw [step1_live hd.2.1, hd.1]
+  rw [(step1_live hd.2.1).feed, hd.1]
   exact ⟨rfl, rfl⟩
 
 /-- Load more, enabled: the items stay, and a load-more is in flight. -/
@@ -733,7 +820,7 @@ theorem refresh_post1 {s : State} (h : canRefresh s = true) :
     intro ss hl e
     have k := drive_call (s := refreshFrom s ss) hl s.nextCall (Call.getTimeline (some pageSize))
     rw [← e] at k
-    rw [step1_live k.2.1, k.1]
+    rw [(step1_live k.2.1).feed, k.1]
     exact ⟨rfl, rfl, rfl⟩
   rcases hlm : s.feed.loadMore with _ | ⟨l, c⟩
   · exact fin s.session hlive (by simp only [step0, startRefresh, h, hlm]; rfl)
@@ -770,9 +857,9 @@ theorem signIn_post {s : State} (h : ready s = true) :
     rw [signIn_step hc]
     simp [signedInEvent, t, i]
   have hd := drive_same t i
-  show (settle (step0 s .signIn).1).1.password = _ ∧ signingIn (settle (step0 s .signIn).1).1.session = true
-  refine ⟨by rw [settle_password, e0]; exact hd.1, ?_⟩
-  have hp := settle_phase (step0 s .signIn).1
+  show (step1 s .signIn).1.password = _ ∧ signingIn (step1 s .signIn).1.session = true
+  refine ⟨by rw [step1_password, e0]; exact hd.1, ?_⟩
+  have hp := step1_phase s .signIn
   unfold signingIn
   rw [hp, e0, hd.2.2]
   show signingIn (Session.step s.session i).1 = true
@@ -793,17 +880,15 @@ theorem signOut_post1 (s : State) :
     · rw [startRefresh_dead (by simp [live, hd])]; exact hd
     · exact hd
   have hl : live (step0 s .signOut).1.session = false := by simp [live, hp]
-  rw [step1_fst, settle_fst]
+  rw [step1_fst, (tidy_core _).session, (tidy_core _).feed, settle_fst]
   simp only [hl, Bool.false_eq_true, ↓reduceIte]
   exact ⟨hp, trivial⟩
 
 /-- Account, while signed in: the panel opens or closes, the feed stays. -/
 theorem toggleAccount_post {s : State} (h : live s.session = true) :
     (s.step .toggleAccount).1.accountOpen = !s.accountOpen ∧ (s.step .toggleAccount).1.feed = s.feed := by
-  show (settle { s.blank with accountOpen := !s.accountOpen }).1.accountOpen = _ ∧
-    (settle { s.blank with accountOpen := !s.accountOpen }).1.feed = _
-  rw [settle_live (s := { s.blank with accountOpen := !s.accountOpen }) h]
-  exact ⟨rfl, rfl⟩
+  have c := step1_live (s := s.blank) (c := .toggleAccount) h
+  exact ⟨c.accountOpen, c.feed⟩
 
 /-- Sign out: signed out, the feed empty. -/
 theorem signOut_post (s : State) :

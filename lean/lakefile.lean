@@ -7,8 +7,8 @@ package sky where
     -- `weak.`: Lake passes it to every module, and only those that use the claim commands know it.
     ⟨`weak.cairn.claims.scope, "sky"⟩]
 
-require "iamnbutler" / "cairn" @ "^0.3.0"
-require "iamnbutler" / "cairn_json" @ "^0.1.0"
+require "iamnbutler" / "cairn" @ "^0.4.0"
+require "iamnbutler" / "cairn_json" @ "^0.1.1"
 require "iamnbutler" / "cairn_atproto" @ "^0.2.0"
 
 /-- The app: its exports (`Sky.Abi`) and everything they import from this package. -/
@@ -25,3 +25,4 @@ lean_lib Checks
 /-- `lake exe fuzz` (`cairn fuzz`): Cairn's fuzzer on the app and a simulated host. -/
 lean_exe fuzz where
   root := `FuzzMain
+

@@ -110,6 +110,34 @@ def race (f : Feed) (len : Nat) : Bool :=
       (f.gotLoadMore l pl).gotRefresh r pr == (f.gotRefresh r pr).gotLoadMore l pl
   | _, _ => true
 
+/-- ^34, as a state: the rows are the feed's posts, keyed by `Rows.make`, from a key above `0`. -/
+def rowsFollow (s : State) : Bool :=
+  s.rows.items == s.feed.items && s.rows == Rows.make s.rows.top s.rows.items && 0 < s.rows.top
+
+/-- ^34, as a step: posts put on top of the posts there (signed in) leave every one of those
+with its key, and the list the same. -/
+def prependKeeps (t : Transition State) : Bool :=
+  let old := t.before.rows.items
+  let new := t.after.feed.items
+  let n := new.length - old.length
+  if live t.after.session && !old.isEmpty && 0 < n && new.drop n == old && n < t.before.rows.top then
+    t.after.rows.top + n == t.before.rows.top && t.after.gen == t.before.gen
+  else true
+
+/-- ^36, as a state: every image load in flight is for an image a row shows; signed out, none
+is, and there are no rows. -/
+def imagesNear (s : State) : Bool :=
+  if live s.session then
+    let srcs := s.rows.items.flatMap sourcesOf
+    s.images.pending.all fun p => srcs.contains p.2
+  else s.images.pending.isEmpty && s.rows == {}
+
+/-- The host drops an image Sky knows, or one it never loaded. -/
+def evict (s : State) : Gen SubEvent := do
+  let known := s.images.known.map (·.1)
+  if known.isEmpty || (← Gen.chance 1 8) then return .evicted "https://example.invalid/never.png"
+  return .evicted (← Gen.elem known)
+
 /-- The timeline as far as the requests the session has sent. -/
 def lengthOf (s : State) : Nat := lengthAt (sessionId s.session.next + 2)
 
@@ -126,6 +154,13 @@ def fuzz : Cairn.Fuzz.Custom State where
     | .writeFile .. | .deleteFile _ | .openItem _ | .forgetSecret _ => some do
       if ← Gen.chance 1 10 then return .failed .other "The fuzz's host failed it."
       return .done
+    | .http _ url .. => some do
+      -- A load-more fails one time in four, so Retry (^31) gets pressed.
+      if (url.splitOn "cursor=").length > 1 && (← Gen.chance 1 4) then
+        return .failed .network "The fuzz's host dropped the connection."
+      match CairnAtproto.Fake.replies FakeCheck.cfg { phase := fun s => some s.session.phase } s id r with
+      | some g => g
+      | none => return .failed .other "not the fake's"
     | _ => some do
       match CairnAtproto.Fake.replies FakeCheck.cfg { phase := fun s => some s.session.phase } s id r with
       | some g => g
@@ -136,7 +171,12 @@ def fuzz : Cairn.Fuzz.Custom State where
       (22, fun t => FakeCheck.cursorOfLast t.after.feed),
       (23, fun t => FakeCheck.race t.after.feed (FakeCheck.lengthOf t.after)),
       (24, fun t => decide (Inv t.after)),
-      (25, fun t => decide (SignedOutEmpty t.after)) ]
+      (25, fun t => decide (SignedOutEmpty t.after)),
+      (34, fun t => FakeCheck.rowsFollow t.after && FakeCheck.prependKeeps t),
+      (36, fun t => FakeCheck.imagesNear t.after) ]
+  subEvents := fun s sb => match sb with
+    | .imageCache _ => some (FakeCheck.evict s)
+    | _ => none
   edits := fun _ id => match id with
     | 6 => some FakeCheck.typeIdentifier
     | 7 => some FakeCheck.typePassword
@@ -144,6 +184,7 @@ def fuzz : Cairn.Fuzz.Custom State where
     | _ => none
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
-    s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty)]
+    s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty &&
+    s.images.pending.isEmpty)]
 
 end Sky

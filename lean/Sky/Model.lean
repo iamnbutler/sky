@@ -3,6 +3,7 @@ module
 public import Sky.Feed
 public import Sky.SessionFacts
 public import Cairn.Text.Field
+public import Cairn.UI.Images
 
 /-! # Sky's model
 
@@ -81,7 +82,65 @@ inductive Own where
   | save
   | delete
   | openHelp
+  /-- Opening a post on bsky.app. -/
+  | openPost
 deriving Repr, DecidableEq, Inhabited
+
+instance : DecidableEq Images := fun a b =>
+  decidable_of_iff (a.known = b.known ∧ a.pending = b.pending) (by cases a; cases b; simp)
+
+/-! ## Rows
+
+The feed's posts as the virtual list shows them. Item `i` of the feed is the row with key
+`top + i`, and the end row (Loading…, Retry, You're all caught up) has key `0`, last. Posts put
+on top take the keys below `top`, so every post already there keeps its key, and the runtime's
+anchor (`VList.record_keeps`) finds the reader's post where it was. A feed replaced or emptied
+starts a new list (`gen`), at the top. -/
+
+/-- The first key of a new list. -/
+def baseTop : Nat := 1000000000
+
+/-- The keys of `n` posts from `top`, then the end row's `0`. -/
+def keysOf (top n : Nat) : Array Nat := ((Array.range n).map (top + ·)).push 0
+
+structure Rows where
+  /-- The first post's key. -/
+  top : Nat := baseTop
+  /-- The posts, as the feed holds them. -/
+  items : List FeedItem := []
+  /-- The same, by index. -/
+  arr : Array FeedItem := #[]
+  /-- `keysOf top items.length`, kept so the view doesn't build it each frame. -/
+  keys : Array Nat := keysOf baseTop 0
+deriving Repr, DecidableEq, Inhabited
+
+def Rows.make (top : Nat) (items : List FeedItem) : Rows :=
+  { top, items, arr := items.toArray, keys := keysOf top items.length }
+
+/-- The index of the post with key `k`. -/
+def Rows.index? (r : Rows) (k : Nat) : Option Nat :=
+  if r.top ≤ k ∧ k - r.top < r.arr.size then some (k - r.top) else none
+
+def Rows.item? (r : Rows) (k : Nat) : Option FeedItem := (r.index? k).bind (r.arr[·]?)
+
+def Rows.has (r : Rows) (k : Nat) : Bool := (r.index? k).isSome
+
+/-- How the feed changed since the rows were made. -/
+inductive Change where
+  | same
+  /-- `n` posts were put on top of the posts there. -/
+  | prepended (n : Nat)
+  | appended
+  /-- Anything else: emptied, or replaced. -/
+  | replaced
+deriving Repr, DecidableEq
+
+def change (old new : List FeedItem) : Change :=
+  if new = old then .same
+  else if !old.isEmpty && old.length < new.length && new.drop (new.length - old.length) = old then
+    .prepended (new.length - old.length)
+  else if new.take old.length = old then .appended
+  else .replaced
 
 structure State where
   session : Session.State := Session.init
@@ -107,6 +166,18 @@ structure State where
   accountOpen : Bool := false
   /-- A sign-in or resume has taken a while (`slowTimer`): Cancel is offered. -/
   slow : Bool := false
+  /-- The feed's rows. -/
+  rows : Rows := {}
+  /-- The list's generation: its ref is `⟨14, gen⟩`, so a new one starts at the top. -/
+  gen : Nat := 0
+  /-- Posts put on top that haven't come into view: the "N new posts" control. -/
+  fresh : Nat := 0
+  /-- The last load-more failed: the end row offers Retry. -/
+  moreFailed : Bool := false
+  /-- The avatars and thumbnails: what is known of each, and the loads in flight (odd ids). -/
+  images : Images := {}
+  /-- The runtime's clock, for "3m" and "Oct 12". -/
+  now : Time := {}
 deriving Repr, DecidableEq, Inhabited
 
 /-! ## Reading the state -/
@@ -159,7 +230,8 @@ def phaseRid : Phase → List Nat
 /-- Every Cairn request id Sky still waits on. -/
 def State.waiting (s : State) : List Nat :=
   s.own.map (·.1) ++ s.forgetting ++ s.session.inflight.map (sessionId ·.1) ++
-    (phaseRid s.session.phase).map sessionId ++ s.session.abandoned.map sessionId
+    (phaseRid s.session.phase).map sessionId ++ s.session.abandoned.map sessionId ++
+    s.images.pending.map (·.1)
 
 /-! ## Words -/
 
@@ -251,7 +323,7 @@ def onAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
   | some (l, _) =>
     if l = id then
       ({ s with feed := s.feed.gotLoadMore id page,
-                problem := prob.map ("Couldn't load more: " ++ ·) }, [])
+                problem := prob.map ("Couldn't load more: " ++ ·), moreFailed := prob.isSome }, [])
     else if s.feed.refresh = some id then
       let f := s.feed.gotRefresh id page
       let s := { s with feed := f, problem := prob.map ("Couldn't refresh: " ++ ·) }
@@ -311,7 +383,8 @@ def startLoadMore (s : State) : State × List Effect :=
   match canLoadMore s, s.feed.cursor with
   | true, some c =>
     let id := s.nextCall
-    drive { s with nextCall := id + 1, feed := { s.feed with loadMore := some (id, c) } }
+    drive { s with nextCall := id + 1, feed := { s.feed with loadMore := some (id, c) },
+                   moreFailed := false }
       (.call id (Call.getTimeline (some pageSize) (some c)))
   | _, _ => (s, [])
 
@@ -368,6 +441,61 @@ def onReadAccount (s : State) (r : Cairn.Reply) : State × List Effect :=
     | none => (s, [])
   | _, _ => (s, [])
 
+/-! ## Images and rows -/
+
+/-- The thumbnails a post shows: at most four. -/
+def thumbsOf : Option Embed → List CairnAtproto.Image
+  | some (.images is) => is.take 4
+  | some (.recordWithMedia _ (.images is)) => is.take 4
+  | _ => []
+
+/-- The images a row shows: the author's avatar and the thumbnails. -/
+def sourcesOf (i : FeedItem) : List String :=
+  (i.post.author.avatar.toList ++ (thumbsOf i.post.embed).map (·.thumb)).eraseDups
+
+/-- Image loads stay in flight only for rows within `span` rows of the last row that came into
+view; what is known of the images within `keepSpan` rows is kept. -/
+def span : Nat := 12
+def keepSpan : Nat := 40
+
+/-- The images of the rows `n` either side of row `i`. -/
+def Rows.sourcesNear (r : Rows) (i n : Nat) : List String :=
+  ((List.range' (i - n) (2 * n + 1)).filterMap (r.arr[·]?)).flatMap sourcesOf
+
+/-- Load each of `srcs` that is neither known nor in flight, as Sky's own requests. -/
+def loadSources (s : State) : List String → State × List Effect
+  | [] => (s, [])
+  | src :: rest =>
+    if s.images.state src = ImageState.loading && !s.images.pending.any (·.2 == src) then
+      let (im, e) := s.images.load (ownId s.nextOwn) src
+      let (s', es) := loadSources { s with images := im, nextOwn := s.nextOwn + 1 } rest
+      (s', e :: es)
+    else loadSources s rest
+
+/-- Row `k` came into view: load its images, cancel the loads for rows far from it, and count
+the new posts above it as seen. -/
+def appearRow (s : State) (k : Nat) : State × List Effect :=
+  match s.rows.index? k with
+  | none => (s, [])
+  | some i =>
+    let near := s.rows.sourcesNear i span
+    let keep := s.rows.sourcesNear i keepSpan
+    let (im, cs) := s.images.cancelWhere fun src => !near.contains src
+    let im := { im with known := im.known.filter fun p => keep.contains p.1 }
+    let (s', es) := loadSources { s with images := im, fresh := min s.fresh i }
+      (match s.rows.arr[i]? with | some it => sourcesOf it | none => [])
+    (s', cs ++ es)
+
+/-- The post's page on bsky.app. -/
+def postUrl (p : Post) : String :=
+  "https://bsky.app/profile/" ++ p.author.handle ++ "/post/" ++ ((p.uri.splitOn "/").getLast?.getD "")
+
+/-- Open row `k`'s post. -/
+def openPost (s : State) (k : Nat) : State × List Effect :=
+  match s.rows.item? k with
+  | some it => sendOwn s .openPost (.openItem (postUrl it.post))
+  | none => (s, [])
+
 def receive0 (s : State) : Msg → State × List Effect
   | .reply id r =>
     match s.own.lookup id with
@@ -380,8 +508,11 @@ def receive0 (s : State) : Msg → State × List Effect
     | none =>
       if id % 2 = 0 then
         driveSession { s with forgetting := s.forgetting.filter (· != id) } (.reply (id / 2) r)
+      else if s.images.waiting id then ({ s with images := s.images.receive id r }, [])
       else (s, [])
   | .timer n => if n = slowTimer then ({ s with slow := true }, []) else (s, [])
+  | .clock t => ({ s with now := t }, [])
+  | .sub _ (.evicted src) => ({ s with images := (s.images.evicted src).1 }, (s.images.evicted src).2)
   | _ => (s, [])
 
 /-- Signed out (no live session): the feed is emptied and every call the session has taken on
@@ -390,6 +521,34 @@ def settle (s : State) : State × List Effect :=
   if live s.session then (s, [])
   else ({ s with feed := {}, session := (Session.step s.session (.cancel (pids s.session))).1 },
         cancelEffects (Session.step s.session (.cancel (pids s.session))).2)
+
+/-- The rows anew, for a feed replaced or emptied: a new list, at the top; every image load
+cancelled. -/
+def restart (s : State) : State × List Effect :=
+  ({ s with rows := Rows.make baseTop s.feed.items, gen := s.gen + 1, fresh := 0,
+            moreFailed := false, images := {} },
+   s.images.pending.map fun p => .cancelRequest p.1)
+
+/-- The rows follow the feed. Posts put on top take keys below the first (the rest keep
+theirs, and count as new until they come into view); posts appended take keys after the last;
+the first posts, and anything else, start a new list. Signed out, there are no rows, and no image loads. -/
+def tidy (s : State) : State × List Effect :=
+  if live s.session then
+    match change s.rows.items s.feed.items with
+    | .same => (s, [])
+    | .prepended n =>
+      if n < s.rows.top then
+        ({ s with rows := Rows.make (s.rows.top - n) s.feed.items, fresh := s.fresh + n }, [])
+      else restart s
+    | .appended =>
+      -- The first posts start a new list: the end row was the only row, so the anchor would
+      -- keep it still and the list would open at its end.
+      if s.rows.items.isEmpty then restart s
+      else ({ s with rows := Rows.make s.rows.top s.feed.items }, [])
+    | .replaced => restart s
+  else
+    ({ s with rows := {}, fresh := 0, moreFailed := false, images := {} },
+     s.images.pending.map fun p => .cancelRequest p.1)
 
 /-- What Sky does: the person's moves and the host's messages. -/
 inductive Cmd where
@@ -406,6 +565,12 @@ inductive Cmd where
   | openHelp
   /-- Open or close the account panel. -/
   | toggleAccount
+  /-- The row with key `k` came into view. -/
+  | appearRow (k : Nat)
+  /-- Open the post of the row with key `k`. -/
+  | openPost (k : Nat)
+  /-- Show the new posts: the list starts again at the top. -/
+  | showNew
   | msg (m : Msg)
 
 def step0 (s : State) : Cmd → State × List Effect
@@ -423,13 +588,17 @@ def step0 (s : State) : Cmd → State × List Effect
   | .nextField => (s, [.focus passwordRef])
   | .openHelp => sendOwn s .openHelp (.openItem appPasswordsUrl)
   | .toggleAccount => ({ s with accountOpen := !s.accountOpen }, [])
+  | .appearRow k => appearRow s k
+  | .openPost k => openPost s k
+  | .showNew => ({ s with gen := s.gen + 1, fresh := 0 }, [])
   | .msg m => receive0 s m
 
-/-- The input, then `settle`. -/
+/-- The input, then `settle`, then the rows follow the feed (`tidy`). -/
 def step1 (s : State) (i : Cmd) : State × List Effect :=
   let (s₁, e₁) := step0 s i
   let (s₂, e₂) := settle s₁
-  (s₂, e₁ ++ e₂)
+  let (s₃, e₃) := tidy s₂
+  (s₃, e₁ ++ e₂ ++ e₃)
 
 /-- The state with the password field blank. -/
 def State.blank (s : State) : State := { s with password := {} }
@@ -445,5 +614,13 @@ def State.step (s : State) : Cmd → State × List Effect
 def initial : State := { own := [(ownId 0, .readService)], nextOwn := 1 }
 
 def initEffects : List Effect := [.request (ownId 0) (.readDefault bundleId "service")]
+
+/-- About 96 MB of decoded images. -/
+def imageBudget : Nat := 96 * 1024 * 1024
+
+/-- Signed in: the host keeps the images within `imageBudget`, and the clock ticks each minute
+for the posts' times. -/
+def subscriptions (s : State) : List Sub :=
+  if live s.session then [.imageCache imageBudget, .every 60000] else []
 
 end Sky

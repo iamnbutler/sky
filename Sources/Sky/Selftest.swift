@@ -76,25 +76,27 @@ final class LoopbackOnly: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-/// The Keychain under a throwaway service, remembering every item it wrote.
+/// The Keychain under a throwaway service, remembering every item it wrote. Calls go one at a
+/// time: the file-based keychain deadlocks a read racing a delete (cairn#237).
 final class ThrowawayKeychain: SecretStore, @unchecked Sendable {
     let keychain = KeychainStore(service: "cairn.sky-selftest-" + UUID().uuidString)
     private let lock = NSLock()
+    private let calls = NSLock()
     private var written: Set<String> = []
 
-    func read(_ account: String) -> Result<String?, ReplyError> { keychain.read(account) }
+    func read(_ account: String) -> Result<String?, ReplyError> { calls.withLock { keychain.read(account) } }
     func write(_ account: String, _ value: String) -> Result<Void, ReplyError> {
         lock.withLock { _ = written.insert(account) }
-        return keychain.write(account, value)
+        return calls.withLock { keychain.write(account, value) }
     }
-    func delete(_ account: String) -> Result<Void, ReplyError> { keychain.delete(account) }
+    func delete(_ account: String) -> Result<Void, ReplyError> { calls.withLock { keychain.delete(account) } }
 
     var accounts: Set<String> { lock.withLock { written } }
     /// The items this run wrote that are still there.
     var held: [String] {
-        accounts.filter { if case .success(.some) = keychain.read($0) { true } else { false } }.sorted()
+        accounts.filter { if case .success(.some) = read($0) { true } else { false } }.sorted()
     }
-    func clean() { for a in accounts { _ = keychain.delete(a) } }
+    func clean() { for a in accounts { _ = delete(a) } }
 }
 
 final class Selftest {
@@ -187,12 +189,41 @@ final class Selftest {
         guard e.wait(through: 0) != nil else { fail("no first frame") }
     }
 
+    /// The feed's list: the largest clip the frame pushes.
+    func listRect(_ f: Frame) -> Rect? {
+        var best: Rect?
+        for d in f.draws { if case let .pushClip(r) = d, r.w >= 300, r.h >= 300, r.h > (best?.h ?? 0) { best = r } }
+        return best
+    }
+    /// The post rows (^32#k) by key: where each is laid.
+    func rows(_ f: Frame) -> [UInt32: Rect] {
+        var out: [UInt32: Rect] = [:]
+        for n in f.ax { if let c = n.control, c.claim == 32 { out[c.key] = n.rect } }
+        return out
+    }
+    /// The first post row showing at the top of the list, and its y.
+    func firstShown(_ f: Frame) -> (key: UInt32, y: Int32)? {
+        guard let l = listRect(f) else { return nil }
+        return rows(f).filter { $0.value.y + $0.value.h > l.y && $0.value.y < l.y + l.h }
+            .min { $0.value.y < $1.value.y }.map { ($0.key, $0.value.y) }
+    }
+    /// Loaded images drawn (Draw.image appears once the host has the pixels).
+    func images(_ f: Frame) -> Int { f.draws.filter { if case .image = $0 { true } else { false } }.count }
+    /// Wheel ticks over the list: `dy` points each, toward the end when positive.
+    func wheel(_ dy: Int32, _ times: Int) {
+        guard let l = listRect(frame) else { fail("no feed list") }
+        let p = Point(x: l.x + l.w / 2, y: l.y + l.h / 2)
+        for _ in 0..<times { engine?.send([.pointerMove(p), .scroll(p, dx: 0, dy: dy)]); Thread.sleep(forTimeInterval: 0.01) }
+    }
+
     /// A load-more or refresh in flight.
     func busy(_ f: Frame) -> Bool { texts(f).contains { $0.contains(" · loading more") || $0.contains(" · refreshing") } }
 
     func posts(_ f: Frame) -> Int? {
-        for t in texts(f) where t.hasSuffix(" posts") || t.contains(" posts ·") {
-            if let n = Int(t.prefix { $0.isNumber }) { return n }
+        for t in texts(f) {
+            let digits = t.prefix { $0.isNumber }
+            let rest = t.dropFirst(digits.count)
+            if rest == " posts" || rest.hasPrefix(" posts ·"), let n = Int(digits) { return n }
         }
         return nil
     }
@@ -253,22 +284,56 @@ final class Selftest {
         f.control("slow?ms=0")
 
         // Signed in: who, the feed, both tokens in the Keychain, the account saved.
-        var fr = until(15, "not signed in") { self.shows(me, $0) && (self.posts($0) ?? 0) > 0 }
+        var fr = until(15, "not signed in") { self.shows(me, $0) && (self.posts($0) ?? 0) > 0 && !self.rows($0).isEmpty }
         guard store.held.count == 2 else { fail("\(store.held.count) Keychain items after sign-in, not 2") }
         guard FileManager.default.fileExists(atPath: account) else { fail("the account wasn't saved") }
-        shot("feed")
         let first = posts(fr) ?? 0
+        guard let top0 = firstShown(fr), top0.key == rows(fr).keys.min() else { fail("the feed doesn't open at its first post") }
 
-        // Load more and Refresh, with posts arriving at the head.
-        until(5, "Load more not offered") { self.node(3, $0) != nil }
-        click(3)
-        fr = until(10, "Load more didn't load") { (self.posts($0) ?? 0) > first && !self.busy($0) }
+        // Images: avatars and embeds load from the fake into their placeholders.
+        fr = until(10, "no image drawn") { self.images($0) > 0 }
+        shot("feed")
+
+        // Scrolling: wheel ticks move the list; the top row changes.
+        wheel(40, 12)
+        fr = until(5, "the wheel didn't scroll the feed") { (self.firstShown($0)?.key ?? 0) != top0.key }
+        until(10, "no image drawn after scrolling") { self.images($0) > 0 }
+        shot("feed-scrolled")
+
+        // Load more: scrolling to the list's end shows its Loading… row, whose appear loads more.
+        var guardTicks = 0
+        while (posts(frame) ?? 0) <= first {
+            guardTicks += 1
+            if guardTicks > 200 { fail("scrolling to the end didn't load more (\(posts(frame) ?? 0) posts)") }
+            wheel(600, 1)
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+        fr = until(10, "Load more didn't finish") { (self.posts($0) ?? 0) > first && !self.busy($0) }
         let more = posts(fr) ?? 0
+        shot("feed-more")
+
+        // Refresh with posts arriving at the head: the reader doesn't move, "3 new posts" offered.
+        wheel(-200, 30)
+        wheel(300, 1)
+        fr = until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
+        Thread.sleep(forTimeInterval: 0.2)
+        guard let before = firstShown(frame) else { fail("no first row") }
         f.control("post?n=3")
-        until(5, "Refresh not offered") { self.node(4, $0) != nil }
         click(4)
-        fr = until(10, "Refresh didn't bring the new posts") { (self.posts($0) ?? 0) >= more + 3 && !self.busy($0) }
+        fr = until(10, "Refresh didn't bring the new posts (\(more) before)") { (self.posts($0) ?? 0) >= more + 3 && !self.busy($0) && self.node(33, $0) != nil }
         let refreshed = posts(fr) ?? 0
+        guard let after = firstShown(fr), after.key == before.key, after.y == before.y else {
+            fail("Refresh moved the reader: \(before) → \(String(describing: firstShown(fr)))")
+        }
+        guard node(33, fr)?.label == "3 new posts" else { fail("no \"3 new posts\": \(node(33, fr)?.label ?? "-")") }
+        shot("feed-new-posts")
+
+        // "3 new posts": the list starts again at its first post, the newest.
+        click(33)
+        fr = until(5, "\"3 new posts\" didn't go to the top") { self.node(33, $0) == nil && self.firstShown($0) != nil }
+        guard let newest = firstShown(fr), newest.key == rows(fr).keys.min() else { fail("not at the newest post") }
+        until(10, "no image drawn at the top") { self.images($0) > 0 }
+        shot("feed-top")
 
         // Quit and launch again: the session resumes from the Keychain, nothing typed.
         engine?.stop()
@@ -292,7 +357,7 @@ final class Selftest {
 
         clean()
         print("selftest: PASS (Sky against the fake PDS: wrong password, rate limit, offline and slow sign-ins in words; "
-              + "signed in by typing, \(first) → \(more) posts by Load more, \(refreshed) by Refresh; resumed; "
+              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; resumed; "
               + "Sign out forgot \(items) Keychain items and the account)")
     }
 }
