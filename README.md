@@ -21,10 +21,12 @@ for rows near the view (at most 6 at a time) and are cancelled as the reader mov
 
 ## The model (`lean/Sky`)
 
-- `Feed`: the items shown (keyed by post URI and repost reason), the cursor of the last page,
-  `atEnd`, and at most one load-more and one refresh in flight, each with its call id. Load more
-  appends a page only if the feed still holds the cursor it asked from; a refresh puts the new
-  posts on top when its page reaches the feed's head, and replaces the feed when it doesn't.
+- `Feed`: cairn_atproto's paged list of timeline items (`Paged FeedItem`): the items shown
+  (keyed by post URI and repost reason), the cursor of the last page, `atEnd`, and at most one
+  load-more and one refresh in flight, each with its call id. Load more appends a page only if
+  the feed still holds the cursor it asked from; a refresh puts the new posts on top when its
+  page reaches the feed's head, and replaces the feed when it doesn't. Proved in cairn_atproto
+  (`cairn_atproto^26`–`^29`).
 - `Model`: `State.step` drives cairn_atproto's session machine (sign in, resume at launch, sign
   out, expiry and token refresh) and routes its answers to the feed. A refresh withdraws the
   load-more in flight (`cancelRequest`); whenever the session isn't signed in, the feed is
@@ -53,10 +55,7 @@ for rows near the view (at most 6 at a time) and are cancelled as the reader mov
 | ^12 | move | Cancel a sign-in or resume, offered once it has taken a few seconds |
 | ^13 | move | Account: open or close the account panel |
 | ^14 | place | the feed: a virtual list of posts and the end row |
-| ^20 | invariant | the feed is a contiguous run of the server's timeline, in its order |
-| ^21 | invariant | a load-more page for a cursor the feed no longer holds changes nothing |
-| ^22 | invariant | the cursor is never lost |
-| ^23 | invariant | a refresh racing a load-more: either order, the same feed |
+| ^20–^23 | invariant | retired: the feed is cairn_atproto's `Paged` list, proved there (`cairn_atproto^26`–`^29`) |
 | ^24 | invariant | at most one load-more and one refresh in flight; every call answered, cancelled or live |
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
 | ^26 | invariant | the password reaches one request (retired: reissued as ^28) |

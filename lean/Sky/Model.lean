@@ -27,8 +27,8 @@ and `redact` as cairn_atproto builds them; its `forget` outputs are `forgetSecre
 its `cancel` outputs `cancelRequest`s.
 
 **Calls.** A load-more and a refresh are session calls (`Call.getTimeline`) under Sky's call
-ids. The app's answer to a call (`Out.answer`) goes to the feed (`Feed.gotLoadMore`,
-`Feed.gotRefresh`). Starting a refresh withdraws the load-more in flight (`withdraw`: the
+ids. The app's answer to a call (`Out.answer`) goes to the feed (`Paged.gotLoadMore`,
+`Paged.gotRefresh`). Starting a refresh withdraws the load-more in flight (`withdraw`: the
 session's `Input.cancel`, which cancels its request or drops it if held for a token refresh), and
 so does a refresh whose page replaces the feed.
 
@@ -278,10 +278,10 @@ def signInWords : Cairn.Reply → String
   | r => describe r
 
 /-- A call's answer, read as a timeline page; and what went wrong, if it did. -/
-def readPage : Answer → Option FeedPage × Option String
+def readPage : Answer → Option (Page FeedItem) × Option String
   | .reply r =>
     match Outcome.ofReply FeedPage.ofJson r with
-    | .ok p => (some p, none)
+    | .ok p => (some p.page, none)
     | .malformed st => (none, some s!"{st}: not a timeline page")
     | _ => (none, some (describe r))
   | .signedOut => (none, none)

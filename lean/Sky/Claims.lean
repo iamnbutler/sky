@@ -21,10 +21,10 @@ meta import Cairn.Claims.Elab
 | ^12 | move | Cancel a sign-in or resume, offered once it has taken a few seconds |
 | ^13 | move | Account: open or close the account panel |
 | ^14 | place | the feed: a virtual list of posts and the end row |
-| ^20 | invariant | the feed is a contiguous run of the server's timeline, in its order |
-| ^21 | invariant | a load-more page for a cursor the feed no longer holds changes nothing |
-| ^22 | invariant | the cursor is never lost |
-| ^23 | invariant | a refresh racing a load-more: either order, the same feed |
+| ^20 | invariant | the feed is a contiguous run of the server's timeline (retired: cairn_atproto^26) |
+| ^21 | invariant | a stale load-more page changes nothing (retired: cairn_atproto^27) |
+| ^22 | invariant | the cursor is never lost (retired: cairn_atproto^28; Sky's steps keep it in ^24) |
+| ^23 | invariant | a refresh racing a load-more (retired: cairn_atproto^29) |
 | ^24 | invariant | at most one load-more and one refresh in flight; every call answered, cancelled or live |
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
 | ^26 | invariant | the password reaches one request (retired: reissued as ^28) |
@@ -216,53 +216,13 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
 
-invariant ^20 contiguous "The feed is a run of the timeline" for machine where
-  does "The feed is a contiguous run of the server's timeline, in its order: no post twice, none skipped. Stated against a timeline with no duplicates: a feed that is a run of it stays one when the next page is appended, when a head page puts new posts on top, and when a head page that doesn't reach the feed replaces it."
-  holds _s := Feed.Contiguous
-  init := Feed.contiguous
-  step := fun _ _ _ => Feed.contiguous
-  receive := fun _ _ _ => Feed.contiguous
+retire ^20 invariant "The feed is a run of the timeline" because "The feed is cairn_atproto's Paged list now (cairn#250), and this is proved for every paged list there: cairn_atproto^26."
 
-/-- A load-more page for a cursor the feed no longer holds changes nothing it shows. -/
-def StalePage : Prop :=
-  ∀ (f : Feed) (id : Nat) (page : Option FeedPage),
-    (∀ c, f.loadMore = some (id, c) → f.cursor ≠ some c) →
-    (f.gotLoadMore id page).content = f.content
+retire ^21 invariant "A stale page changes nothing" because "The feed is cairn_atproto's Paged list now (cairn#250), and this is proved for every paged list there: cairn_atproto^27."
 
-theorem stale_page : StalePage := fun f id page h => Feed.gotLoadMore_stale f id page h
+retire ^22 invariant "The cursor is never lost" because "The feed is cairn_atproto's Paged list now (cairn#250), and every operation on a paged list keeps its cursor: cairn_atproto^28. Sky's steps keep it as part of ^24's invariant (`Inv.cur`)."
 
-invariant ^21 stalePage "A stale page changes nothing" for machine where
-  does "A load-more page asked from a cursor the feed no longer holds (a refresh replaced the feed meanwhile) never changes the posts, the cursor or the end; nor does an answer to any call but the load-more in flight."
-  holds _s := StalePage
-  init := stale_page
-  step := fun _ _ _ => stale_page
-  receive := fun _ _ _ => stale_page
-
-invariant ^22 cursorKept "The cursor is never lost" for machine where
-  does "A feed with posts that isn't at its end holds a cursor: the one that came with its last page (fuzzed: equal to it)."
-  holds s := Inv s ∧ CursorKept s.feed
-  init := ⟨inv_initial, inv_initial.cur⟩
-  step := fun s a h => by
-    have i := update_inv (P := Inv) (fun s c h => step_inv h c) s a h.1
-    exact ⟨i, i.cur⟩
-  receive := fun s m h => by
-    have i := step_inv h.1 (.msg m)
-    exact ⟨i, i.cur⟩
-
-/-- A refresh racing a load-more: their answers in either order give the same feed. -/
-def Race : Prop :=
-  ∀ (f : Feed) (l r : Nat) (c : String) (pl pr : Option FeedPage),
-    f.loadMore = some (l, c) → f.cursor = some c → f.items ≠ [] → f.refresh = some r →
-    (f.gotLoadMore l pl).gotRefresh r pr = (f.gotRefresh r pr).gotLoadMore l pl
-
-theorem race_any : Race := fun f l r c pl pr hl hc hne hr => Feed.race f l r c pl pr hl hc hne hr
-
-invariant ^23 race "A refresh racing a load-more" for machine where
-  does "With a load-more and a refresh both in flight, their answers in either order (or either failing) leave the same feed: the result of one of the two orders, and so of both."
-  holds _s := Race
-  init := race_any
-  step := fun _ _ _ => race_any
-  receive := fun _ _ _ => race_any
+retire ^23 invariant "A refresh racing a load-more" because "The feed is cairn_atproto's Paged list now (cairn#250), and this is proved for every paged list there: cairn_atproto^29."
 
 invariant ^24 inFlight "Requests in flight are accounted for" for machine where
   does "At most one load-more and one refresh are in flight, each a different call the session has taken on (sent or held for a token refresh); the load-more was asked from the cursor the feed holds; the session's requests have distinct ids. The fuzz checks every request is answered, cancelled or live."
