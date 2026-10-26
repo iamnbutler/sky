@@ -1,4 +1,5 @@
 import Sky.Fuzz
+import Cairn.Runtime.ScrollProofs
 
 /-! Sky's model, scenario by scenario, with pages of cairn_atproto's fake PDS
 (`CairnAtproto.Fake`). `#guard`s, so they run whenever this builds (`make lean`, via
@@ -270,19 +271,23 @@ def loaded : State := run notesOpen [reply 6 notesPage]
 /- A muted account's notifications are left out of the rows (the mute table, ^40). -/
 #guard (State.noteGroups { loaded with acts := loaded.acts.toggleMute "did:plc:dan" }).map Group.words ==
   ["@bob.test and @alice.test liked your post", "@carol.test followed you"]
-/- After the head, the unread count is polled (request 8); at most one: the minute's tick sends
+/- After the head, the posts the rows show are asked for in one getPosts (request 8): the
+liked post and Dan's reply. -/
+#guard (requests notesOpen (reply 6 notesPage)).any fun (id, u) =>
+  id == 8 && contains u "getPosts" && contains u "did%3Aplc%3Adan"
+/- Then the unread count is polled (request 10); at most one: the minute's tick sends
 none while it is in flight. -/
 #guard (requests notesOpen (reply 6 notesPage)).map (·.2) |>.any (contains · "getUnreadCount")
 #guard loaded.notes.poll.isSome
 #guard !((requests loaded (.msg (.sub (.every 60000) .tick))).any fun (_, u) => contains u "getUnreadCount")
 /- The badge: the poll's count, then less what is marked seen. -/
-def polled : State := run loaded [reply 8 (unreadReply 4)]
+def polled : State := run loaded [reply 10 (unreadReply 4)]
 #guard polled.notes.badge == some "4" && polled.notes.poll.isNone
 /- Seen only once on screen: nothing is marked until a row appears; the newest row appearing
-marks the list seen up to it at once (the badge goes) and sends updateSeen (request 10). -/
+marks the list seen up to it at once (the badge goes) and sends updateSeen (request 12). -/
 #guard polled.notes.seen.shown == 0 && polled.notes.seen.1.mark == 0
 def keyOf (s : State) (i : Nat) : Nat := (s.noteGroups[i]?.map (·.key)).getD 0
-#guard (requests polled (.noteAppear (keyOf polled 0))).any fun (id, u) => id == 10 && contains u "updateSeen"
+#guard (requests polled (.noteAppear (keyOf polled 0))).any fun (id, u) => id == 12 && contains u "updateSeen"
 def marked : State := run polled [.noteAppear (keyOf polled 0)]
 #guard marked.notes.seen.shown == t0 + 4000 && marked.notes.seen.1.mark == t0 + 4000
 #guard marked.notes.badge == none
@@ -292,19 +297,51 @@ def marked : State := run polled [.noteAppear (keyOf polled 0)]
 /- A row appearing from a frame before Home (late) marks nothing. -/
 #guard (run polled [.openHome, .noteAppear (keyOf polled 0)]).notes.seen.1.mark == 0
 /- Acknowledged: what the server holds. Refused: rolled back, in words. -/
-#guard (run marked [reply 10 (json 200 (.obj []))]).notes.seen.1.entry.server == t0 + 4000
+#guard (run marked [reply 12 (json 200 (.obj []))]).notes.seen.1.entry.server == t0 + 4000
 /- Acknowledged, the count is polled again: the server's own, from the new seen time. A poll due
 while one is in flight goes once that one answers. -/
-#guard (requests marked (reply 10 (json 200 (.obj [])))).any fun (_, u) => contains u "getUnreadCount"
-#guard (run marked [reply 10 (json 200 (.obj [])), reply 12 (unreadReply 1)]).notes.badge == some "1"
+#guard (requests marked (reply 12 (json 200 (.obj [])))).any fun (_, u) => contains u "getUnreadCount"
+#guard (run marked [reply 12 (json 200 (.obj [])), reply 14 (unreadReply 1)]).notes.badge == some "1"
 #guard (run loaded [.msg (.sub (.every 60000) .tick)]).notes.pollDue &&
-  (requests loaded (reply 8 (unreadReply 4)) |>.any fun (_, u) => contains u "getUnreadCount") == false &&
-  ((requests (run loaded [.msg (.sub (.every 60000) .tick)]) (reply 8 (unreadReply 4))).any fun (_, u) => contains u "getUnreadCount")
-#guard (run marked [reply 10 (err 400 "InvalidRequest" "no")]) |> fun s =>
+  (requests loaded (reply 10 (unreadReply 4)) |>.any fun (_, u) => contains u "getUnreadCount") == false &&
+  ((requests (run loaded [.msg (.sub (.every 60000) .tick)]) (reply 10 (unreadReply 4))).any fun (_, u) => contains u "getUnreadCount")
+#guard (run marked [reply 12 (err 400 "InvalidRequest" "no")]) |> fun s =>
   s.notes.seen.shown == 0 && (s.problem.map (contains · "Couldn't mark notifications read")).getD false
 /- Lost (a timeout): read back with the first page, whose seenAt says it was applied. -/
-#guard (requests marked (reply 10 (.failed .timeout "timed out"))).any fun (_, u) => contains u "listNotifications?limit=1"
+#guard (requests marked (reply 12 (.failed .timeout "timed out"))).any fun (_, u) => contains u "listNotifications?limit=1"
+/- The Dock: the poll's count goes to the badge, said once as it rises; marked seen, cleared. -/
+#guard (loaded.step (reply 10 (unreadReply 4))).2.any fun | .badge b => b == some "4" | _ => false
+#guard (loaded.step (reply 10 (unreadReply 4))).2.any fun
+  | .announce t _ => t == "4 unread notifications" | _ => false
+#guard polled.unreadSent == 4 && marked.unreadSent == 0
+#guard (polled.step (.noteAppear (keyOf polled 0))).2.any fun | .badge b => b == none | _ => false
+/- Follow back, on Carol's follow: the follows' table shows her followed at once. -/
+#guard canNoteAct polled .follow (keyOf polled 1) && !polled.notePostRow (keyOf polled 1)
+#guard (run polled [.noteAct .follow (keyOf polled 1)]).acts.following "did:plc:carol"
+/- Dan's reply is a post row: Like once its view arrives (getPosts, request 8). -/
+def dansPost : Post := { uri := "at://did:plc:dan/x/1", cid := "c", author := who "dan", text := "hi",
+                         indexedAt := formatDatetime (t0 + 1000) }
+def viewed : State := run polled [reply 8 (json 200 ({ posts := [dansPost] } : Posts).toJson)]
+#guard !canNoteAct polled .like (keyOf polled 2) && canNoteAct viewed .like (keyOf viewed 2)
+#guard (run viewed [.noteAct .like (keyOf viewed 2)]).acts.liked dansPost.uri
+/- Muting Dan from his row's menu takes his row away in the same step (^69). -/
+#guard (run viewed [.noteAct .mute (keyOf viewed 2)]).noteGroups.length == 2
+/- Home and back: each list keeps its ref; pressing the tab showing puts it at its top. -/
+#guard (run polled [.openHome]).tab == .home && (run polled [.openHome, .openNotes]).tab == .notifications
+#guard (run polled [.openHome]).gen == polled.gen
+#guard ((run polled [.openHome]).step .openHome).2.any fun
+  | .scrollTo r .start => r == feedRef | _ => false
+#guard (polled.step .openNotes).2.any fun | .scrollTo r .start => r == notesRef | _ => false
+#guard (MenuItem.enabledOf (menuBar polled) goHomeRef) == some true
+
 /- Signed out: no notifications, no poll, Home. -/
 #guard (run polled [.signOut]) |> fun s => s.notes.list == {} && s.notes.poll.isNone && s.tab == .home
+
+/-- ^84: the list not shown keeps its offset. Cairn's `fixUI_keeps_offset` applied to Sky's
+`keptLists`, here because the runtime's proofs are not a `module` (cairn#278). -/
+theorem keptOffset (s : State) (laid : Laid) (pointer : Option Point) (ui : UI) {r : ControlRef}
+    (hk : r ∈ keptLists s) (hs : Cairn.Runtime.onScreen (Cairn.Runtime.scrollersOf laid) r = false) :
+    (Cairn.Runtime.fixUI laid pointer ui (keptLists s)).scrollOf r = ui.scrollOf r :=
+  Cairn.Runtime.fixUI_keeps_offset laid pointer ui (keptLists s) hk hs
 
 end Sky.Tests

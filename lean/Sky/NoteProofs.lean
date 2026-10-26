@@ -96,15 +96,31 @@ theorem startPoll_calm (s : State) : Calm s (startPoll s).1 := by
   · next hc => exact noteCall_calm (by simp only [Bool.and_eq_true] at hc; exact hc.1) (by intro _ _; rfl) _
   · exact ⟨rfl, rfl, rfl, rfl⟩
 
+theorem foldl_sendPosts_calm : ∀ (us : List (List String)) (acc : State × List Effect),
+    live acc.1.session = true → Calm acc.1 (us.foldl sendPosts acc).1
+  | [], _, _ => Calm.refl _
+  | u :: us, acc, h => by
+    have h1 : Calm acc.1 (sendPosts acc u).1 := by
+      unfold sendPosts; exact noteCall_calm h (by intro _ _; rfl) _
+    exact h1.trans (foldl_sendPosts_calm us _ (h1.liveEq.trans h))
+
 theorem flushNotes_calm (s : State) : Calm s (flushNotes s).1 := by
   unfold flushNotes; split
   · next hl =>
-    have h0 : Calm s { s with notes := { s.notes with todo := [] } } := ⟨rfl, rfl, rfl, rfl⟩
-    have h1 := h0.trans
-      (foldl_sendSeen_calm s.notes.todo ({ s with notes := { s.notes with todo := [] } }, []) hl)
-    generalize s.notes.todo.foldl sendSeen ({ s with notes := { s.notes with todo := [] } }, []) = q at h1 ⊢
+    have hp : Calm s { s with notes := { s.notes with postsDue := [] } } := ⟨rfl, rfl, rfl, rfl⟩
+    have h00 := hp.trans (foldl_sendPosts_calm (chunksOf maxGetPosts s.notes.postsDue)
+      ({ s with notes := { s.notes with postsDue := [] } }, []) hl)
+    generalize (chunksOf maxGetPosts s.notes.postsDue).foldl sendPosts
+      ({ s with notes := { s.notes with postsDue := [] } }, []) = r at h00 ⊢
+    obtain ⟨s₀, e₀⟩ := r
+    dsimp only at h00 ⊢
+    have h0 : Calm s₀ { s₀ with notes := { s₀.notes with todo := [] } } := ⟨rfl, rfl, rfl, rfl⟩
+    have h1 := h00.trans (h0.trans
+      (foldl_sendSeen_calm s₀.notes.todo ({ s₀ with notes := { s₀.notes with todo := [] } }, [])
+        (h00.liveEq.trans hl)))
+    generalize s₀.notes.todo.foldl sendSeen ({ s₀ with notes := { s₀.notes with todo := [] } }, []) = q at h1 ⊢
     obtain ⟨s1, e1⟩ := q
-    dsimp only; split
+    dsimp only at h1 ⊢; split
     · exact h1.trans (startPoll_calm _)
     · exact h1
   · exact ⟨rfl, rfl, rfl, rfl⟩
@@ -159,23 +175,35 @@ theorem step_eq {s : State} {c : Cmd} (hb : c ≠ .signIn) (hp : ∀ op, c ≠ .
     (s.step c).1 = { (step1 s.blank c).1 with password := s.password } := by
   rw [step_blind s c hb hp]
 
-/-- The Notifications tab, signed in: the notifications show; the feed stays. -/
+/-- The Notifications tab, signed in: the notifications show (pressed again, at their top);
+the feed stays. -/
 theorem openNotes_post {s : State} (h : live s.session = true) :
     (s.step .openNotes).1.tab = .notifications ∧ (s.step .openNotes).1.feed = s.feed := by
   have hc : Calm { clearOut s.blank with tab := .notifications } (step0 (clearOut s.blank) .openNotes).1 := by
-    show Calm _ (openNotes (clearOut s.blank)).1
-    unfold openNotes
-    exact (startNoteRefresh_calm _).trans (markSeenNow_calm _)
+    show Calm _ (if (clearOut s.blank).tab == .notifications then notesTop _ else openNotes _).1
+    split
+    · next ht =>
+      have ht : s.tab = .notifications := by simpa [clearOut, State.blank] using ht
+      exact ⟨rfl, rfl, by simp [notesTop, clearOut, State.blank, ht], rfl⟩
+    · unfold openNotes
+      exact (startNoteRefresh_calm _).trans (markSeenNow_calm _)
   have k := step_core (s := s) (c := .openNotes) (by intro h; cases h) (by intro _ h; cases h) (hc.liveEq.trans h)
   rw [step_eq (by intro h; cases h) (by intro _ h; cases h)]
   exact ⟨k.tab.trans hc.tab, k.feed.trans hc.feed⟩
 
-/-- Home, signed in: the feed shows. -/
+/-- Home, signed in: the feed shows (pressed again, at its top). -/
 theorem openHome_post {s : State} (h : live s.session = true) :
     (s.step .openHome).1.tab = .home ∧ (s.step .openHome).1.feed = s.feed := by
-  have k := step_core (s := s) (c := .openHome) (by intro h; cases h) (by intro _ h; cases h) h
+  have hc : Calm { clearOut s.blank with tab := .home } (step0 (clearOut s.blank) .openHome).1 := by
+    show Calm _ (if (clearOut s.blank).tab == .home then feedTop _ else ({ clearOut s.blank with tab := .home }, [])).1
+    split
+    · next ht =>
+      have ht : s.tab = .home := by simpa [clearOut, State.blank] using ht
+      exact ⟨rfl, rfl, by simp [feedTop, clearOut, State.blank, ht], rfl⟩
+    · exact Calm.refl _
+  have k := step_core (s := s) (c := .openHome) (by intro h; cases h) (by intro _ h; cases h) (hc.liveEq.trans h)
   rw [step_eq (by intro h; cases h) (by intro _ h; cases h)]
-  exact ⟨k.tab, k.feed⟩
+  exact ⟨k.tab.trans hc.tab, k.feed.trans hc.feed⟩
 
 def canNoteRefresh (s : State) : Bool := live s.session && s.notes.list.refresh.isNone
 
@@ -244,7 +272,9 @@ theorem noteAppear_post {s : State} (h : live s.session = true) (k : Nat) :
     split
     · next g _ =>
       have c := markSeenNow_calm
-        { clearOut s.blank with notes := { s.notes with seen := s.notes.seen.appear (newestMs g.members) } }
+        { clearOut s.blank with notes := { s.notes with
+            seen := s.notes.seen.appear (newestMs g.members),
+            fresh := min s.notes.fresh ((clearOut s.blank).noteGroups.findIdx (·.key == k)) } }
       refine ⟨?_, c.phase, c.feed⟩
       exact Nat.le_trans (Nat.le_max_left _ _) (Nat.le_of_eq c.mark.symm)
     · exact ⟨Nat.le_refl _, rfl, rfl⟩
@@ -287,9 +317,33 @@ theorem onAnswer_notes (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1
 theorem noteAnswer_mark (s : State) (id : Nat) (a : Answer) :
     (noteAnswer s id a).1.notes.seen.1.mark ≤ s.notes.seen.1.mark := by
   unfold noteAnswer
-  repeat' (first | (dsimp only; done) | split | (dsimp only; split) | intro)
-  all_goals (try rw [hearSeen_mark])
-  all_goals exact Nat.le_refl _
+  split
+  dsimp only
+  split
+  · split
+    · rw [hearSeen_mark]; exact Nat.le_refl _
+    · exact Nat.le_refl _
+  split
+  · split
+    · rw [hearSeen_mark]; exact Nat.le_refl _
+    · exact Nat.le_refl _
+  split
+  · split
+    · exact Nat.le_refl _
+    · exact Nat.le_refl _
+  split
+  · split
+    · split
+      · exact Nat.le_refl _
+      · exact Nat.le_refl _
+    · exact Nat.le_refl _
+  split
+  · split
+    · rw [hearSeen_mark]; exact Nat.le_refl _
+    · split
+      · rw [hearSeen_mark]; exact Nat.le_refl _
+      · rw [hearSeen_mark]; exact Nat.le_refl _
+  · exact Nat.le_refl _
 
 theorem handleOut_mark (acc : State × List Effect) (o : Out) :
     (handleOut acc o).1.seenMark ≤ acc.1.seenMark := by
@@ -372,8 +426,26 @@ theorem step0_mark (s : State) (c : Cmd) : MarkStep s (step0 s c).1 := by
     simp only [step0, Sky.openPost]
     split <;> exact .le (Nat.le_refl _)
   | openNotes =>
-    exact MarkStep.le (Nat.le_of_eq
-      ((startNoteRefresh_calm { s with tab := .notifications }).trans (markSeenNow_calm _)).mark)
+    show MarkStep s (if s.tab == .notifications then notesTop s else openNotes s).1
+    split
+    · exact .le (Nat.le_refl _)
+    · exact MarkStep.le (Nat.le_of_eq
+        ((startNoteRefresh_calm { s with tab := .notifications }).trans (markSeenNow_calm _)).mark)
+  | openHome =>
+    show MarkStep s (if s.tab == .home then feedTop s else ({ s with tab := .home }, [])).1
+    split <;> exact .le (Nat.le_refl _)
+  | noteShowNew => exact .le (Nat.le_refl _)
+  | noteAct kind k =>
+    show MarkStep s (noteActStep s kind k)
+    unfold noteActStep; split
+    · split <;> exact .le (Nat.le_refl _)
+    · exact .le (Nat.le_refl _)
+  | noteOpen k =>
+    show MarkStep s (Sky.noteOpen s k).1
+    unfold Sky.noteOpen; split <;> exact .le (Nat.le_refl _)
+  | noteCopy k =>
+    show MarkStep s (Sky.noteCopy s k).1
+    unfold Sky.noteCopy; split <;> exact .le (Nat.le_refl _)
   | noteRefresh => exact .le (Nat.le_of_eq (startNoteRefresh_calm s).mark)
   | noteMore => exact .le (Nat.le_of_eq (startNoteMore_calm s).mark)
   | noteAppear k =>
@@ -383,8 +455,12 @@ theorem step0_mark (s : State) (c : Cmd) : MarkStep s (step0 s c).1 := by
     split
     · next g hg =>
       have c := markSeenNow_calm
-        { s with notes := { s.notes with seen := s.notes.seen.appear (newestMs g.members) } }
-      have hm : (markSeenNow { s with notes := { s.notes with seen := s.notes.seen.appear (newestMs g.members) } }).1.seenMark
+        { s with notes := { s.notes with
+            seen := s.notes.seen.appear (newestMs g.members),
+            fresh := min s.notes.fresh (s.noteGroups.findIdx (·.key == k)) } }
+      have hm : (markSeenNow { s with notes := { s.notes with
+            seen := s.notes.seen.appear (newestMs g.members),
+            fresh := min s.notes.fresh (s.noteGroups.findIdx (·.key == k)) } }).1.seenMark
           = max s.seenMark (newestMs g.members) := c.mark
       unfold MarkStep; rw [hm]
       by_cases hle : newestMs g.members ≤ s.seenMark

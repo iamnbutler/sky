@@ -413,8 +413,19 @@ structure Notes where
   /-- A poll is due: after a refresh, at sign-in, and on the minute's tick. -/
   pollDue : Bool := false
   /-- The list's generation: a new list (the first notifications, a replaced list, another
-  account) is a new virtual list, at the top. -/
+  account), or "N new" pressed, is put at the top the next time it shows (`State.notesAimed`). -/
   gen : Nat := 0
+  /-- Rows a refresh put above the one at the top that haven't come into view: "N new". -/
+  fresh : Nat := 0
+  /-- The views of the posts the rows show (the liked or reposted post, a reply, mention or
+  quote), from `getPosts`. -/
+  posts : List Post := []
+  /-- The `getPosts` calls in flight: their call ids and the URIs each asked for. -/
+  postCalls : List (Nat × List String) := []
+  /-- The URIs asked for already (in flight or answered), so none is asked for twice. -/
+  asked : List String := []
+  /-- URIs to ask for at the end of the step (`flushNotes`). -/
+  postsDue : List String := []
 deriving Repr, DecidableEq, Inhabited
 
 /-- **The unread count shown**: the last poll's, less the notifications Sky holds that what is
@@ -428,7 +439,61 @@ def Notes.badge (n : Notes) : Option String :=
 
 /-- The ids of the calls the notes wait on. -/
 def Notes.calls (n : Notes) : List Nat :=
-  n.list.inFlight ++ n.poll.toList ++ n.seenCalls.map (·.1)
+  n.list.inFlight ++ n.poll.toList ++ n.seenCalls.map (·.1) ++ n.postCalls.map (·.1)
+
+/-! ## The posts the rows show -/
+
+/-- Whether a notification is a post of someone else's that the row shows as a post, with its
+actions: a reply, a mention or a quote. -/
+def isPostReason : NotificationReason → Bool
+  | .reply | .mention | .quote => true
+  | _ => false
+
+/-- The post a notification's row shows: the liked or reposted post (the account's own), or the
+reply, mention or quote itself. -/
+def postUriOf (n : Notification) : Option String :=
+  match n.reason with
+  | .like | .repost => n.reasonSubject
+  | .reply | .mention | .quote => some n.uri
+  | _ => none
+
+/-- Ask for the posts the notifications `items` show that haven't been asked for. -/
+def Notes.want (n : Notes) (items : List Notification) : Notes :=
+  let new := ((items.filterMap postUriOf).eraseDups).filter fun u => !n.asked.contains u
+  { n with asked := n.asked ++ new, postsDue := n.postsDue ++ new }
+
+/-- The view of the post at `uri`, once `getPosts` has brought it. -/
+def Notes.post? (n : Notes) (uri : String) : Option Post := n.posts.find? (·.uri == uri)
+
+/-- Views that arrived: each replaces the one held for its post. -/
+def Notes.gotPosts (n : Notes) (ps : List Post) : Notes :=
+  { n with posts := ps ++ n.posts.filter fun o => !ps.any (·.uri == o.uri) }
+
+/-- `l` cut into runs of at most `k` (`k > 0`): `getPosts` takes 25 at a time. -/
+def chunksOf {α : Type} (k : Nat) (l : List α) : List (List α) :=
+  (List.range ((l.length + k - 1) / k)).map fun i => (l.drop (k * i)).take k
+
+/-- The `bsky.app` page of an AT URI's post: `at://did/app.bsky.feed.post/rkey` →
+`https://bsky.app/profile/did/post/rkey`. -/
+def atUrl (uri : String) : String :=
+  match ((uri.drop 5).toString.splitOn "/") with
+  | [did, _, rkey] => "https://bsky.app/profile/" ++ did ++ "/post/" ++ rkey
+  | _ => "https://bsky.app"
+
+def profileUrl (p : Profile) : String := "https://bsky.app/profile/" ++ p.handle
+
+/-- What a row opens on bsky.app: the liked or reposted post, the follower's profile (the
+newest's), or the reply, mention or quote. -/
+def Group.url (g : Group) : String :=
+  match g.reason, g.subject, g.members.head? with
+  | .like, some u, _ | .repost, some u, _ => atUrl u
+  | .follow, _, some n => profileUrl n.author
+  | _, _, some n => if isPostReason g.reason then atUrl n.uri else profileUrl n.author
+  | _, _, none => "https://bsky.app/notifications"
+
+/-- How many unread notifications, in words (announced when the count rises). -/
+def unreadWords (n : Nat) : String :=
+  if n = 1 then "1 unread notification" else s!"{n} unread notifications"
 
 /-- What the rows of the list are keyed by: the group's oldest notification (new ones join a
 group at its top), hashed, never `0` (the end row's key). -/

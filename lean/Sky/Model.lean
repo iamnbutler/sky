@@ -195,6 +195,12 @@ structure State where
   tab : Tab := .home
   /-- The account just muted from a row: the status line offers Undo until `lineTimer`. -/
   undoMute : Option String := none
+  /-- The unread count the Dock badge was last set to (`dock`). -/
+  unreadSent : Nat := 0
+  /-- The feed's generation its list was last put at the top for (`dock`). -/
+  feedAimed : Nat := 0
+  /-- The notifications' generation their list was last put at the top for (`dock`). -/
+  notesAimed : Nat := 0
 deriving Repr, Inhabited
 
 /-! ## Reading the state -/
@@ -426,26 +432,69 @@ top (the runtime's anchor would keep the old first row still). -/
 def newList (old new : Paged Notification) : Bool :=
   new.items != old.items && (old.items.isEmpty || !old.items.isSuffixOf new.items)
 
-/-- The answer to one of the notes' calls. -/
+/-- Accounts whose notifications are left out: those the mute table shows muted (`Sky.Acts`). -/
+def State.muted (s : State) (did : String) : Bool := s.acts.muted did
+
+/-- The rows of the notifications list. -/
+def State.noteGroups (s : State) : List Group := shownGroups s.muted s.notes.list.items
+
+/-- The notifications in a page, as the acts see them: each author's follow and mute
+(`Acts.seeProfile`), so Follow back and a row's menu show the server's. -/
+def seeAuthors (s : State) (items : List Notification) : Acts :=
+  items.foldl (fun a n => Acts.seeProfile (ctxOf s) a n.author) s.acts
+
+/-- The rows a head page `l` put above the row at the top: the groups before the old first
+group's key. -/
+def freshAbove (s : State) (l : Paged Notification) : Nat :=
+  match s.noteGroups.head? with
+  | some g => ((shownGroups s.muted l.items).findIdx? (·.key == g.key)).getD 0
+  | none => 0
+
+/-- A `getPosts` answer: the posts, or none if it failed. -/
+def postsOf : Answer → Option (List Post)
+  | .reply r =>
+    match Outcome.ofReply Posts.ofJson r with
+    | .ok ps => some ps.posts
+    | _ => none
+  | .signedOut => none
+
+/-- The answer to one of the notes' calls. A page's notifications ask for the posts their rows
+show (`Notes.want`) and are seen by the acts (`seeAuthors`); `getPosts`' answer is kept and
+seen by the acts like a timeline page. -/
 def noteAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
   let n := s.notes
   if n.list.loadMore.map (·.1) = some id then
     let (page, prob) := readNotes a
-    let s := { s with notes := { n with list := n.list.gotLoadMore id (page.map (·.page)),
-                                        moreFailed := prob.isSome } }
+    let items := (page.map (·.page.items)).getD []
+    let s := { s with notes := { n.want items with
+                                   list := n.list.gotLoadMore id (page.map (·.page)),
+                                   moreFailed := prob.isSome },
+                      acts := seeAuthors s items }
     match page.bind (·.seenAt) with
     | some t => hearSeen s (.seen (msOf t))
     | none => (s, [])
   else if n.list.refresh = some id then
     let (page, prob) := readNotes a
+    let items := (page.map (·.page.items)).getD []
     let l := n.list.gotRefresh id (page.map (·.page))
-    let s := { s with notes := { n with list := l, pollDue := true, gen := n.gen + if newList n.list l then 1 else 0 },
+    let s := { s with notes := { n.want items with
+                                   list := l, pollDue := true,
+                                   gen := n.gen + if newList n.list l then 1 else 0,
+                                   fresh := if newList n.list l then 0 else n.fresh + freshAbove s l },
+                      acts := seeAuthors s items,
                       problem := match prob with
                         | some p => some ("Couldn't load notifications: " ++ p)
                         | none => s.problem }
     match page.bind (·.seenAt) with
     | some t => hearSeen s (.seen (msOf t))
     | none => (s, [])
+  else if n.postCalls.any (·.1 == id) then
+    let uris := ((n.postCalls.find? (·.1 == id)).map (·.2)).getD []
+    let n := { n with postCalls := n.postCalls.filter (·.1 != id) }
+    match postsOf a with
+    | some ps => ({ s with notes := n.gotPosts ps,
+                           acts := Acts.seePage (ctxOf s) id s.acts (ps.map fun p => { post := p }) }, [])
+    | none => ({ s with notes := { n with asked := n.asked.filter fun u => !uris.contains u } }, [])
   else if n.poll = some id then
     let n := { n with poll := none }
     match a with
@@ -560,15 +609,24 @@ def startPoll (s : State) : State × List Effect :=
                                      pollDue := false }) Call.getUnreadCount
   else ({ s with notes := { s.notes with pollDue := s.notes.pollDue && live s.session } }, [])
 
-/-- Send what the notes queued in this step: the seen key's writes and reads, and a poll that is
-due. Signed out, nothing (and `settle` empties the notes). -/
+/-- Ask for the posts `uris` (at most 25) with `getPosts`. -/
+def sendPosts (acc : State × List Effect) (uris : List String) : State × List Effect :=
+  let (s, es) := noteCall acc.1 (fun id n => { n with postCalls := (id, uris) :: n.postCalls })
+    (Call.getPosts uris)
+  (s, acc.2 ++ es)
+
+/-- Send what the notes queued in this step: the posts the rows show (25 to a call), the seen
+key's writes and reads, and a poll that is due. Signed out, nothing (and `settle` empties the
+notes). -/
 def flushNotes (s : State) : State × List Effect :=
   if live s.session then
-    let (s₁, e₁) := s.notes.todo.foldl sendSeen ({ s with notes := { s.notes with todo := [] } }, [])
+    let (s₀, e₀) := (chunksOf maxGetPosts s.notes.postsDue).foldl sendPosts
+      ({ s with notes := { s.notes with postsDue := [] } }, [])
+    let (s₁, e₁) := s₀.notes.todo.foldl sendSeen ({ s₀ with notes := { s₀.notes with todo := [] } }, [])
     if s₁.notes.pollDue then
       let (s₂, e₂) := startPoll s₁
-      (s₂, e₁ ++ e₂)
-    else (s₁, e₁)
+      (s₂, e₀ ++ e₁ ++ e₂)
+    else (s₁, e₀ ++ e₁)
   else (s, [])
 
 /-- Ask for the head of the notifications. A load-more in flight is forgotten (its answer will
@@ -603,19 +661,15 @@ def markSeenNow (s : State) : State × List Effect :=
     (s₂, e₁ ++ e₂)
   else (s, [])
 
-/-- Accounts whose notifications are left out: those the mute table shows muted (`Sky.Acts`). -/
-def State.muted (s : State) (did : String) : Bool := s.acts.muted did
-
-/-- The rows of the notifications list. -/
-def State.noteGroups (s : State) : List Group := shownGroups s.muted s.notes.list.items
-
 /-- The row with key `k` came into view: the mark moves up to its newest notification, and the
 list is marked seen. Only while the list shows (an appear from a frame before Home is late). -/
 def noteAppear (s : State) (k : Nat) : State × List Effect :=
   if s.tab != .notifications then (s, []) else
   match s.noteGroups.find? (·.key == k) with
   | some g =>
-    markSeenNow { s with notes := { s.notes with seen := s.notes.seen.appear (newestMs g.members) } }
+    markSeenNow { s with notes := { s.notes with
+                                    seen := s.notes.seen.appear (newestMs g.members),
+                                    fresh := min s.notes.fresh (s.noteGroups.findIdx (·.key == k)) } }
   | none => (s, [])
 
 /-- Show the notifications: load their head, and mark seen what has appeared. -/
@@ -769,17 +823,24 @@ def settle (s : State) : State × List Effect :=
                  notes := { did := s.notes.did, seen := s.notes.seen.reset, gen := s.notes.gen }, tab := .home },
         cancelEffects (Session.step s.session (.cancel (pids s.session))).2)
 
-/-- The rows anew, for a feed replaced or emptied: a new list, at the top; every image load
-cancelled. -/
+/-- The other first key, for a list replaced: keys from the other end of the range, so the rows of
+the new list never take the keys (and the heights the runtime knew) of the old one's. -/
+def altTop : Nat := 3000000000
+
+/-- The first key of a new list: `baseTop` or `altTop`, whichever the rows aren't near. -/
+def nextTop (s : State) : Nat := if 2000000000 < s.rows.top then baseTop else altTop
+
+/-- The rows anew, for a feed replaced or emptied: a new list (a new generation, put at the top
+by `dock`); every image load cancelled. -/
 def restart (s : State) : State × List Effect :=
-  ({ s with rows := Rows.make baseTop s.feed.items, gen := s.gen + 1, fresh := 0,
+  ({ s with rows := Rows.make (nextTop s) s.feed.items, gen := s.gen + 1, fresh := 0,
             moreFailed := false, images := {} },
    s.images.pending.map fun p => .cancelRequest p.1)
 
 /-- The rows follow the feed. Posts put on top take keys below the first (the rest keep
 theirs, and count as new until they come into view); posts appended take keys after the last;
 the first posts, and anything else, start a new list. Signed out, there are no rows, and no image loads. -/
-def tidy (s : State) : State × List Effect :=
+def tidyRows (s : State) : State × List Effect :=
   if live s.session then
     match change s.rows.items s.feed.items with
     | .same => (s, [])
@@ -796,6 +857,36 @@ def tidy (s : State) : State × List Effect :=
   else
     ({ s with rows := {}, fresh := 0, moreFailed := false, images := {} },
      s.images.pending.map fun p => .cancelRequest p.1)
+
+/-! ## The Dock badge and the lists' tops -/
+
+/-- The feed's list. Its ref never changes: a new generation is put at the top with `scrollTo`,
+and the runtime keeps the list's place while the notifications show (`App.keepScroll`). -/
+def feedRef : ControlRef := ⟨14, 0⟩
+
+/-- The notifications' list, likewise. -/
+def notesRef : ControlRef := ⟨60, 0⟩
+
+/-- The feed shows and its list hasn't been put at the top for its generation. -/
+def feedAim (s : State) : Bool := live s.session && s.tab == .home && s.feedAimed != s.gen
+
+def notesAim (s : State) : Bool := live s.session && s.tab == .notifications && s.notesAimed != s.notes.gen
+
+/-- The end of every step: the Dock badge set to the unread count shown when it changed (and a
+rise announced), and the list shown put at its top if its generation is new since it was last. -/
+def dock (s : State) : State × List Effect :=
+  ({ s with unreadSent := s.notes.unreadShown,
+            feedAimed := if feedAim s then s.gen else s.feedAimed,
+            notesAimed := if notesAim s then s.notes.gen else s.notesAimed },
+   (if s.notes.unreadShown == s.unreadSent then []
+    else .badge s.notes.badge ::
+      (if s.unreadSent < s.notes.unreadShown then [.announce (unreadWords s.notes.unreadShown) .low] else [])) ++
+   (if feedAim s then [.scrollTo feedRef .start] else []) ++
+   (if notesAim s then [.scrollTo notesRef .start] else []))
+
+/-- The rows follow the feed (`tidyRows`), then the badge and the lists' tops (`dock`). -/
+def tidy (s : State) : State × List Effect :=
+  ((dock (tidyRows s).1).1, (tidyRows s).2 ++ (dock (tidyRows s).1).2)
 
 /-! ## Acts -/
 
@@ -884,6 +975,76 @@ def copyLink (s : State) (k : Nat) : State × List Effect :=
   | some it => (s, [.setClipboard (postUrl it.post)])
   | none => (s, [])
 
+/-! ## Acting from the notifications -/
+
+/-- The notifications' row with key `k`. -/
+def State.noteGroup? (s : State) (k : Nat) : Option Group := s.noteGroups.find? (·.key == k)
+
+/-- The post the row with key `k` is (a reply, mention or quote), once its view has arrived. -/
+def State.notePost? (s : State) (k : Nat) : Option Post :=
+  match s.noteGroup? k with
+  | some g => if isPostReason g.reason then (g.members.head?).bind fun n => s.notes.post? n.uri else none
+  | none => none
+
+/-- The account a row's Follow back or menu acts on: its newest member's. -/
+def State.noteAuthor? (s : State) (k : Nat) : Option Profile :=
+  (s.noteGroup? k).bind fun g => g.members.head?.map (·.author)
+
+/-- Whether `kind` can be pressed on the notifications' row with key `k`, with the
+notifications showing: Like and Repost on a reply, mention or quote whose view has arrived;
+Follow on such a row's menu, and as Follow back on a follow row of one account; Mute on such a
+row's menu; never on the account's own. -/
+def canNoteAct (s : State) (kind : Kind) (k : Nat) : Bool :=
+  live s.session && s.tab == .notifications &&
+    match s.noteGroup? k, s.noteAuthor? k with
+    | some g, some a =>
+      match kind with
+      | .like | .repost => (s.notePost? k).isSome
+      | .follow => (isPostReason g.reason || (g.reason == .follow && g.authors.length == 1)) &&
+          a.did != (ctxOf s).did
+      | .mute => isPostReason g.reason && a.did != (ctxOf s).did
+    | _, _ => false
+
+/-- Whether the notifications' row with key `k` is a post (a reply, mention or quote). -/
+def State.notePostRow (s : State) (k : Nat) : Bool := (s.noteGroup? k).any (isPostReason ·.reason)
+
+/-- A post row's menu (^78) is offered: signed in, the notifications showing. -/
+def canNoteMenu (s : State) (k : Nat) : Bool :=
+  live s.session && s.tab == .notifications && s.notePostRow k
+
+/-- The key `kind` acts on from the row with key `k`: the post, or its account. -/
+def noteKey (s : State) (kind : Kind) (k : Nat) : String :=
+  match kind with
+  | .like | .repost => ((s.notePost? k).map (·.uri)).getD ""
+  | .follow | .mute => ((s.noteAuthor? k).map (·.did)).getD ""
+
+/-- Press `kind` on the notifications' row with key `k`: the table shows the toggled value at
+once and queues its write. A mute takes the account's rows away in the same step (^69). -/
+def noteActStep (s : State) (kind : Kind) (k : Nat) : State :=
+  if canNoteAct s kind k then
+    match kind with
+    | .mute => { s with acts := s.acts.toggleMute (noteKey s .mute k) }
+    | _ => { s with acts := Acts.toggle (ctxOf s) s.acts kind (noteKey s kind k) }
+  else s
+
+/-- Open what the row with key `k` is about on bsky.app (`Group.url`). -/
+def noteOpen (s : State) (k : Nat) : State × List Effect :=
+  match s.noteGroup? k with
+  | some g => sendOwn s .openPost (.openItem g.url)
+  | none => (s, [])
+
+/-- Copy the link of the post the row with key `k` is. -/
+def noteCopy (s : State) (k : Nat) : State × List Effect :=
+  match s.noteGroup? k with
+  | some g => (s, [.setClipboard g.url])
+  | none => (s, [])
+
+/-- The list showing goes to its top: a new generation (`dock` puts it there), nothing new. -/
+def feedTop (s : State) : State × List Effect := ({ s with gen := s.gen + 1, fresh := 0 }, [])
+
+def notesTop (s : State) : State × List Effect :=
+  ({ s with notes := { s.notes with gen := s.notes.gen + 1, fresh := 0 } }, [])
+
 /-- What Sky does: the person's moves and the host's messages. -/
 inductive Cmd where
   | signIn
@@ -905,9 +1066,9 @@ inductive Cmd where
   | showNew
   /-- Like, repost, follow or mute from the row with key `k`. -/
   | act (kind : Kind) (k : Nat)
-  /-- Show the notifications. -/
+  /-- Show the notifications; showing, back to their top. -/
   | openNotes
-  /-- Show the home feed. -/
+  /-- Show the home feed; showing, back to its top. -/
   | openHome
   /-- Refresh the notifications. -/
   | noteRefresh
@@ -919,6 +1080,14 @@ inductive Cmd where
   | undoMute
   /-- Copy the link of the post of the row with key `k`. -/
   | copyLink (k : Nat)
+  /-- "N new" in the notifications: back to their top. -/
+  | noteShowNew
+  /-- Like, repost, follow or mute from the notifications' row with key `k`. -/
+  | noteAct (kind : Kind) (k : Nat)
+  /-- Open what the notifications' row with key `k` is about, on bsky.app. -/
+  | noteOpen (k : Nat)
+  /-- Copy the link of the notifications' row with key `k`. -/
+  | noteCopy (k : Nat)
   | msg (m : Msg)
 
 def step0 (s : State) : Cmd → State × List Effect
@@ -941,8 +1110,12 @@ def step0 (s : State) : Cmd → State × List Effect
   | .act kind k => actStep s kind k
   | .undoMute => (undoMuteStep s, [])
   | .copyLink k => copyLink s k
-  | .openNotes => openNotes s
-  | .openHome => ({ s with tab := .home }, [])
+  | .openNotes => if s.tab == .notifications then notesTop s else openNotes s
+  | .openHome => if s.tab == .home then feedTop s else ({ s with tab := .home }, [])
+  | .noteShowNew => notesTop s
+  | .noteAct kind k => (noteActStep s kind k, [])
+  | .noteOpen k => noteOpen s k
+  | .noteCopy k => noteCopy s k
   | .noteRefresh => startNoteRefresh s
   | .noteMore => startNoteMore s
   | .noteAppear k => noteAppear s k

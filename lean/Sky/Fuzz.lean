@@ -199,9 +199,13 @@ def worldGen : Gen World := do
 /-- Like, repost, follow and mute pressed often, so their writes race; Undo after a mute too;
 Sign Out (the app menu) only once a page is in, and seldom, like Cancel, since a world whose
 password can't be typed stays signed out after them. The notifications and both Retries often
-enough that their rows come into view, load more and refresh. -/
+enough that their rows come into view, load more and refresh; acting from a notification (Like,
+Repost, Follow back) often, and the tabs and the Go menu often enough that each list is left and
+come back to. -/
 def weights (s : State) (r : ControlRef) : Nat :=
   if r.claim == 37 || r.claim == 38 then 6
+  else if r.claim == 76 || r.claim == 77 || r.claim == 83 then 4
+  else if r.claim == 62 || r.claim == 73 || r.claim == 74 || r.claim == 75 then 3
   else if r.claim == 39 || r.claim == 40 || r.claim == 58 then 3
   else if r.claim == 49 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)
   else if r.claim == 12 then 1
@@ -277,7 +281,11 @@ def fuzz : Cairn.Fuzz.Custom State where
       (47, fun t => FakeCheck.imagesNear t.after),
       (68, fun t => FakeCheck.groupsOk t.after),
       (69, fun t => FakeCheck.groupsOk t.after),
-      (71, fun t => FakeCheck.pollOk t.after) ]
+      (71, fun t => FakeCheck.pollOk t.after),
+      (84, fun t => (t.after.tab == .home || t.after.tab == .notifications) &&
+        keptLists t.after == [feedRef, notesRef]),
+      (85, fun t => t.after.unreadSent == t.after.notes.unreadShown) ]
+  badge := [(85, fun s b => b == s.notes.badge)]
   subEvents := fun s sb => match sb with
     | .imageCache _ => some (FakeCheck.evict s)
     | _ => none
@@ -303,6 +311,6 @@ def fuzz : Cairn.Fuzz.Custom State where
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
     s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty &&
-    s.images.pending.isEmpty && s.notes.calls.isEmpty && s.notes.todo.isEmpty)]
+    s.images.pending.isEmpty && s.notes.calls.isEmpty && s.notes.todo.isEmpty && s.notes.postsDue.isEmpty)]
 
 end Sky

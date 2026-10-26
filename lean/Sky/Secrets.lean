@@ -55,10 +55,14 @@ theorem settle_pw (t : State) (p : Text.SecureField) :
   unfold settle; split <;> rfl
 
 /-- `tidy`'s effects never read the password. -/
+theorem tidyRows_pw (t : State) (p : Text.SecureField) :
+    tidyRows { t with password := p } = ({ (tidyRows t).1 with password := p }, (tidyRows t).2) := by
+  simp only [tidyRows, restart]
+  split <;> (try split) <;> (try split) <;> rfl
+
 theorem tidy_snd_pw (t : State) (p : Text.SecureField) :
     (tidy { t with password := p }).2 = (tidy t).2 := by
-  simp only [tidy, restart]
-  split <;> (try split) <;> (try split) <;> rfl
+  simp only [tidy, tidyRows_pw]; rfl
 
 theorem settle_snd_pw (t : State) (p : Text.SecureField) :
     (settle { t with password := p }).2 = (settle t).2 := by
@@ -109,9 +113,31 @@ theorem cancels_reqs (ids : List Nat) :
   | nil => rfl
   | cons _ _ ih => exact ih
 
-/-- `tidy` only cancels. -/
-theorem tidy_snd (s : State) : ∃ ids : List Nat, (tidy s).2 = ids.map Effect.cancelRequest := by
-  unfold tidy restart
+/-- `dock` only sets the badge, says the count and scrolls. -/
+theorem dock_all (P : Effect → Prop) (hb : ∀ b, P (.badge b)) (ha : ∀ t p, P (.announce t p))
+    (hs : ∀ r t, P (.scrollTo r t)) (s : State) : ∀ e ∈ (dock s).2, P e := by
+  intro e he
+  simp only [dock, List.mem_append] at he
+  rcases he with (he | he) | he
+  · split at he
+    · exact absurd he List.not_mem_nil
+    · rcases List.mem_cons.1 he with rfl | he
+      · exact hb _
+      · split at he
+        · rcases List.mem_singleton.1 he with rfl; exact ha _ _
+        · exact absurd he List.not_mem_nil
+  all_goals split at he
+  all_goals first
+    | exact absurd he List.not_mem_nil
+    | (rcases List.mem_singleton.1 he with rfl; exact hs _ _)
+
+theorem dock_reqs (s : State) : (dock s).2.filterMap reqOf = [] :=
+  List.filterMap_eq_nil_iff.2 (dock_all (fun e => reqOf e = none) (fun _ => rfl) (fun _ _ => rfl)
+    (fun _ _ => rfl) s)
+
+/-- `tidyRows` only cancels. -/
+theorem tidyRows_snd (s : State) : ∃ ids : List Nat, (tidyRows s).2 = ids.map Effect.cancelRequest := by
+  unfold tidyRows restart
   split
   · split
     · exact ⟨[], rfl⟩
@@ -125,7 +151,9 @@ theorem tidy_snd (s : State) : ∃ ids : List Nat, (tidy s).2 = ids.map Effect.c
   · exact ⟨_, (List.map_map ..).symm⟩
 
 theorem tidy_reqs (s : State) : (tidy s).2.filterMap reqOf = [] := by
-  obtain ⟨ids, e⟩ := tidy_snd s; rw [e]; exact cancels_reqs ids
+  obtain ⟨ids, e⟩ := tidyRows_snd s
+  show ((tidyRows s).2 ++ (dock (tidyRows s).1).2).filterMap reqOf = []
+  rw [List.filterMap_append, e, cancels_reqs ids, dock_reqs]; rfl
 
 /-- The state Sign In leaves, before `settle`. -/
 def signedInTo (s₀ : State) : State :=
@@ -230,7 +258,10 @@ theorem cancels_noSecret (ids : List Nat) : NoSecret (ids.map Effect.cancelReque
   rfl
 
 theorem tidy_noSecret (s : State) : NoSecret (tidy s).2 := by
-  obtain ⟨ids, e⟩ := tidy_snd s; rw [e]; exact cancels_noSecret ids
+  obtain ⟨ids, e⟩ := tidyRows_snd s
+  show NoSecret ((tidyRows s).2 ++ (dock (tidyRows s).1).2)
+  rw [e]; exact noSecret_append (cancels_noSecret ids)
+    (dock_all _ (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) _)
 
 theorem cancelWhere_noSecret (t : Images) (p : String → Bool) : NoSecret (t.cancelWhere p).2 := by
   intro e he
@@ -455,11 +486,26 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
     · intro e he; simp only [List.mem_singleton] at he; subst he; rfl
     · exact noSecret_nil
   | openNotes =>
-    simp only [step0, Sky.openNotes]
+    simp only [step0]
+    split
+    · exact noSecret_nil
+    simp only [Sky.openNotes]
     rw [startNoteRefresh_dead, markSeenNow_dead]
     · exact noSecret_nil
     all_goals exact live_signedOut h
-  | openHome => exact noSecret_nil
+  | openHome => simp only [step0]; split <;> exact noSecret_nil
+  | noteShowNew => exact noSecret_nil
+  | noteAct kind k => exact noSecret_nil
+  | noteOpen k =>
+    simp only [step0, Sky.noteOpen]
+    split
+    · exact sendOwn_noSecret _ _ _ rfl
+    · exact noSecret_nil
+  | noteCopy k =>
+    simp only [step0, Sky.noteCopy]
+    split
+    · intro e he; simp only [List.mem_singleton] at he; subst he; rfl
+    · exact noSecret_nil
   | noteRefresh =>
     simp only [step0, startNoteRefresh_dead (live_signedOut h)]; exact noSecret_nil
   | noteMore =>
@@ -497,7 +543,7 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
       split
       · exact noSecret_nil
       · split
-        · obtain ⟨n', p, e⟩ := (hearSeen_only s .retry).1
+        · obtain ⟨n', p, a, e⟩ := (hearSeen_only s .retry).1
           rw [e, flushNotes_dead]
           · exact noSecret_append (timers_noSecret (hearSeen_only s .retry).2) noSecret_nil
           · exact live_signedOut h
