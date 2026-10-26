@@ -3,7 +3,7 @@
 1	place	active	-	Sky window
 2	move	retired	ba7d8b90a8b037f7	Sign in
 3	move	retired	d237a538a4f6fb20	Load more
-4	move	active	ca3a711f5b125bde	Refresh
+4	move	active	1c88a1622800b973	Refresh
 5	move	retired	161725456253d644	Sign out
 6	move	active	5928a27bfa96792b	Type your handle or email
 7	move	active	6be3a9a690ed133c	Type your app password
@@ -24,17 +24,17 @@
 27	invariant	retired	4a44c424ddf0f802	Signed out, no secret
 28	invariant	retired	9c8c94ba19c4917b	The password reaches one request
 29	invariant	retired	92acca994d0fd08f	Signed out, no secret
-30	move	active	ce3b88005c86b50a	Reach the end of the feed
-31	move	active	005ba869a2fd0cef	Retry loading more
-32	move	active	4dfe3c22b720caa9	A post
-33	move	active	7bfc03c128b56ea3	Show new posts
+30	move	active	81b5c8cd556235f0	Reach the end of the feed
+31	move	active	5f4f165903e37780	Retry loading more
+32	move	active	a421f71e9837ea75	A post
+33	move	active	5cb8974669d271d0	Show new posts
 34	invariant	retired	f38dbd8ba58d946b	Posts keep their keys
 35	invariant	active	b09d72a09d49dd01	The post you are reading stays still
 36	invariant	retired	d306d24e1e0e4cde	Image loads only near the view
-37	move	active	74397ae86379db7e	Like a post
-38	move	active	419275d8491eefa5	Repost a post
-39	move	active	3ba84392d78ec16e	Follow a post's author
-40	move	active	abefd7349e4c315b	Mute an account
+37	move	active	b3ba469508a5ed77	Like a post
+38	move	active	a1f8708a80d4db70	Repost a post
+39	move	active	cc53cc291a0de3e5	Follow a post's author
+40	move	active	0259131b911e6062	Mute an account
 41	invariant	active	0c965c594e57dcae	Likes, reposts, follows and mutes settle on the server's
 42	invariant	active	9df4ce683f8dd6fa	A muted account's posts appear nowhere
 43	invariant	active	08185208874361b1	Signed out, no acts held
@@ -47,18 +47,18 @@
 50	place	active	-	The View menu
 51	move	active	9c040623dd28c042	Refresh from the View menu
 52	place	active	-	A post's menu
-53	move	active	4cbd424154d11203	Copy a post's link
-54	move	active	c28f895b4fa1b433	Open a post on bsky.app
+53	move	active	ac20522010e26d67	Copy a post's link
+54	move	active	f6c4aa50073e8c27	Open a post on bsky.app
 55	invariant	active	99d4e72bcf818aa0	Like and Repost are toggles that show the table
 56	invariant	active	b8fe512f2f00b9ed	Sign Out is in the app menu
 57	invariant	active	10ac594258db9b5e	A post's menu says what the tables show
-58	move	active	9790324c3e830e3d	Undo a mute
+58	move	active	2c017d2214edd36b	Undo a mute
 60	place	active	-	The notifications
 61	move	active	77b2e63c5b63e900	Notifications
 62	move	active	9a57075e4f69490b	Home
 63	move	active	d2e0fe863403580b	Refresh the notifications
-64	move	active	3df7df040092ecc6	Reach the end of the notifications
-65	move	active	576a6bc782846fff	Retry loading more notifications
+64	move	active	c6b6154e75842402	Reach the end of the notifications
+65	move	active	376b86a1e259248c	Retry loading more notifications
 66	move	active	675bf80573c14903	A notification
 67	invariant	active	9ed72eaef6800e48	The notifications are a run of the server's
 68	invariant	active	bb9fd2ea5cc8bc53	The groups partition the notifications

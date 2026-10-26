@@ -99,11 +99,11 @@ retire ^3 move "Load more" because "The end of the list loads more as it comes i
 move ^4 refreshMove (s : State) "Refresh" in ^1 where
   does "While signed in, press Refresh."
   sees "Sky asks for the head of the feed and stops any load-more in flight. New posts are put on top; if more than a page arrived, the feed is replaced by the new page."
-  enabled := canRefresh s
+  enabled := canRefresh s && s.tab == .home
   on press
     emit := s.step .refresh
     post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore = none ∧ s'.feed.refresh = some s.nextCall
-    sound := by intro s h; exact refresh_post h
+    sound := by intro s h; exact refresh_post (bool_left h)
 
 retire ^5 move "Sign out" because "Sign out moved into the account panel, and Cancel is its own move (cairn#210): reissued as ^11 and ^12."
 
@@ -177,42 +177,42 @@ retire ^13 move "Account" because "The account panel held only Sign out, which m
 move ^30 reachEnd (s : State) "Reach the end of the feed" in ^14 where
   does "Scroll the feed to its end, while it isn't at the end of the timeline."
   sees "Loading… shows at the end, and the next page, from the cursor the feed holds, is appended below the posts already there; if a refresh replaced the feed first, the page is dropped."
-  enabled := canLoadMore s && !s.moreFailed
+  enabled := canLoadMore s && !s.moreFailed && s.tab == .home
   on appear
     emit := s.step .loadMore
     post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore.isSome
-    sound := by intro s h; exact loadMore_post (bool_left h)
+    sound := by intro s h; exact loadMore_post (bool_left (bool_left h))
 
 move ^31 retryMore (s : State) "Retry loading more" in ^14 where
   does "After a load-more failed, press Retry at the end of the feed."
   sees "Sky asks for the next page again, from the cursor the feed holds."
-  enabled := canLoadMore s && s.moreFailed
+  enabled := canLoadMore s && s.moreFailed && s.tab == .home
   on press
     emit := s.step .loadMore
     post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore.isSome
-    sound := by intro s h; exact loadMore_post (bool_left h)
+    sound := by intro s h; exact loadMore_post (bool_left (bool_left h))
 
 move ^32 postRowMove (s : State) (k : Nat) "A post" in ^14 where
   does "Press a post (or Return on it); or scroll it into view. A post hidden by a mute is neither."
   sees "Pressed, the post opens on bsky.app. In view, its avatar and images load (grey until they do, the same size after), and loads for posts far from it are cancelled."
-  enabled := canOpenRow s k
+  enabled := canOpenRow s k && s.tab == .home
   on press
     emit := s.step (.openPost k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session
-    sound := by intro s k h; exact openPost_post (bool_left (bool_left h)) k
+    sound := by intro s k h; exact openPost_post (bool_left (bool_left (bool_left h))) k
   on appear
     emit := s.step (.appearRow k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session
-    sound := by intro s k h; exact appearRow_post (bool_left (bool_left h)) k
+    sound := by intro s k h; exact appearRow_post (bool_left (bool_left (bool_left h))) k
 
 move ^33 showNewMove (s : State) "Show new posts" in ^1 where
   does "After a refresh put posts above the one you are reading, press N new posts."
   sees "The feed goes back to its top, the newest post first."
-  enabled := canShowNew s
+  enabled := canShowNew s && s.tab == .home
   on press
     emit := s.step .showNew
     post s' := s.gen < s'.gen ∧ s'.feed = s.feed
-    sound := by intro s h; exact showNew_post (bool_left h)
+    sound := by intro s h; exact showNew_post (bool_left (bool_left h))
 
 place ^48 menuBarPlace "Sky's menus" in ^1 where
   does "Sky's own items in the menu bar: Sign Out at the top of the app menu, and the View menu."
@@ -226,41 +226,41 @@ place ^52 postMenuPlace "A post's menu" in ^14 where
 move ^37 likeMove (s : State) (k : Nat) "Like a post" in ^14 where
   does "While signed in, press the Like toggle (♡ and the count) under a post."
   sees "The post shows liked (♥, selected) or not, and its like count moves by one, in the same frame, everywhere it appears; greyed until the server answers. Sky writes the like record (putRecord with a record key it mints, or deleteRecord); if the server refuses, the post shows what it did before and the status line says why; if the answer is lost, Sky reads the record back before it believes either."
-  enabled := canAct s .like k
+  enabled := canAct s .like k && s.tab == .home
   on press
     emit := s.step (.act .like k)
     post s' := ∀ it, s.rows.item? k = some it → s'.acts.liked it.post.uri = !s.acts.liked it.post.uri
-    sound := by intro s k h it hit; exact act_post h it hit
+    sound := by intro s k h it hit; exact act_post (bool_left h) it hit
 
 move ^38 repostMove (s : State) (k : Nat) "Repost a post" in ^14 where
   does "While signed in, press the Repost toggle (⇄ and the count) under a post."
   sees "The post shows reposted (selected) or not, and its repost count moves by one, in the same frame. The write, a refusal and a lost answer go as for Like (^37)."
-  enabled := canAct s .repost k
+  enabled := canAct s .repost k && s.tab == .home
   on press
     emit := s.step (.act .repost k)
     post s' := ∀ it, s.rows.item? k = some it →
       s'.acts.reposted it.post.uri = !s.acts.reposted it.post.uri
-    sound := by intro s k h it hit; exact act_post h it hit
+    sound := by intro s k h it hit; exact act_post (bool_left h) it hit
 
 move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^52 where
   does "While signed in, open someone else's post's menu (⋯, or the secondary click on the post) and choose Follow @handle (Unfollow once following)."
   sees "Every post by that account shows Unfollow (or Follow) in the same frame. Sky writes the follow record; a refusal and a lost answer go as for Like (^37)."
-  enabled := canAct s .follow k
+  enabled := canAct s .follow k && s.tab == .home
   on press
     emit := s.step (.act .follow k)
     post s' := ∀ it, s.rows.item? k = some it →
       s'.acts.following it.post.author.did = !s.acts.following it.post.author.did
-    sound := by intro s k h it hit; exact act_post h it hit
+    sound := by intro s k h it hit; exact act_post (bool_left h) it hit
 
 move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^52 where
   does "While signed in, open someone else's post's menu (⋯, or the secondary click on the post) and choose Mute @handle."
   sees "Every post by the account, and every repost by it, is gone from the feed in the same frame, without moving the post you are reading (^42, ^35), and a post quoting it says \"Quoted post from an account you muted\". The status line says \"Muted @handle\" with Undo (^58) for a few seconds. Sky sends muteActor; a refusal brings the posts back and says why; a lost answer sends the same mute again until one is answered."
-  enabled := canAct s .mute k
+  enabled := canAct s .mute k && s.tab == .home
   on press
     emit := s.step (.act .mute k)
     post s' := ∀ it, s.rows.item? k = some it →
       s'.acts.muted (muteTarget s it) = !s.acts.muted (muteTarget s it)
-    sound := by intro s k h it hit; exact act_post h it hit
+    sound := by intro s k h it hit; exact act_post (bool_left h) it hit
 move ^61 notesTab (s : State) "Notifications" in ^1 where
   does "While signed in, on the feed, press Notifications (it shows the unread count, if there is one)."
   sees "The notifications show, and Sky asks for their head. Once rows have come into view, Sky marks them seen."
@@ -291,20 +291,20 @@ move ^63 noteRefreshMove (s : State) "Refresh the notifications" in ^1 where
 move ^64 reachNotesEnd (s : State) "Reach the end of the notifications" in ^60 where
   does "Scroll the notifications to their end, while there are older ones."
   sees "Loading… shows at the end, and the next page is appended below; if a refresh replaced the list first, the page is dropped."
-  enabled := canNoteMore s && !s.notes.moreFailed
+  enabled := canNoteMore s && !s.notes.moreFailed && s.tab == .notifications
   on appear
     emit := s.step .noteMore
     post s' := s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.loadMore.isSome
-    sound := by intro s h; exact noteMore_post (bool_left h)
+    sound := by intro s h; exact noteMore_post (bool_left (bool_left h))
 
 move ^65 retryNotes (s : State) "Retry loading more notifications" in ^60 where
   does "After loading more notifications failed, press Retry at the end of the list."
   sees "Sky asks for the next page again."
-  enabled := canNoteMore s && s.notes.moreFailed
+  enabled := canNoteMore s && s.notes.moreFailed && s.tab == .notifications
   on press
     emit := s.step .noteMore
     post s' := s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.loadMore.isSome
-    sound := by intro s h; exact noteMore_post (bool_left h)
+    sound := by intro s h; exact noteMore_post (bool_left (bool_left h))
 
 move ^66 noteRowMove (s : State) (k : Nat) "A notification" in ^60 where
   does "Scroll a row of the notifications into view."
@@ -336,29 +336,29 @@ move ^51 refreshMenu (s : State) "Refresh from the View menu" in ^50 where
 move ^53 copyLinkMove (s : State) (k : Nat) "Copy a post's link" in ^52 where
   does "Open a post's menu and choose Copy Link to Post."
   sees "The post's address on bsky.app is on the clipboard. Nothing else changes."
-  enabled := canOpenRow s k
+  enabled := canOpenRow s k && s.tab == .home
   on press
     emit := s.step (.copyLink k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session ∧ s'.acts.tables.likes = s.acts.tables.likes
-    sound := by intro s k h; exact copyLink_post (bool_left (bool_left h)) k
+    sound := by intro s k h; exact copyLink_post (bool_left (bool_left (bool_left h))) k
 
 move ^54 openMenuMove (s : State) (k : Nat) "Open a post on bsky.app" in ^52 where
   does "Open a post's menu and choose Open on bsky.app."
   sees "The post opens on bsky.app in the browser, as pressing the post does (^32)."
-  enabled := canOpenRow s k
+  enabled := canOpenRow s k && s.tab == .home
   on press
     emit := s.step (.openPost k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session
-    sound := by intro s k h; exact openPost_post (bool_left (bool_left h)) k
+    sound := by intro s k h; exact openPost_post (bool_left (bool_left (bool_left h))) k
 
 move ^58 undoMuteMove (s : State) "Undo a mute" in ^1 where
   does "Just after muting an account from a post's menu, press Undo in the status line (\"Muted @handle. Their posts are hidden.\"). It is offered for a few seconds."
   sees "The account is unmuted: its posts and reposts show again in the same frame, where they were, and Sky sends unmuteActor."
-  enabled := canUndoMute s
+  enabled := canUndoMute s && s.tab == .home
   on press
     emit := s.step .undoMute
     post s' := ∀ d, s.undoMute = some d → s'.acts.muted d = false
-    sound := by intro s h d hd; exact undoMute_post h hd
+    sound := by intro s h d hd; exact undoMute_post (bool_left h) hd
 
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }

@@ -532,7 +532,8 @@ def hideRows (hidden : Nat → Bool) : List (Nat × Nat) → List VList.Row → 
 the point it lays at. A mute can hide many rows at once, each recorded taller; laid by the
 record alone, the list would learn them a window at a time, a layout each, and could show a
 frame laid by heights it no longer has. Known, the list is laid right in the layout after the
-mute, and the record keeps the post being read still (`VList.record_keeps`, ^35). -/
+mute, and the record keeps the post being read still (`VList.record_keeps`, ^35). Until the
+runtime settles a list however many layouts it takes (cairn#276). -/
 def feedUI (s : State) (ui : UI) : UI :=
   if s.acts.tables.mutes.size == 0 then ui else
   let r := listRef s
