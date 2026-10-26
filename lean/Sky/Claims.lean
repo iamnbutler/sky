@@ -49,6 +49,18 @@ meta import Cairn.Claims.Elab
 | ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
 | ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
 | ^47 | invariant | image loads only for rows near the view; none signed out |
+| ^60 | place | the notifications: a virtual list of grouped rows and the end row |
+| ^61 | move | Notifications (with the unread count): show the notifications |
+| ^62 | move | Home: back to the feed |
+| ^63 | move | Refresh the notifications |
+| ^64 | move | the end of the notifications comes into view: load more |
+| ^65 | move | Retry, after loading more notifications failed |
+| ^66 | move | a row of the notifications comes into view: marked seen up to it |
+| ^67 | invariant | the notifications are a contiguous, newest-first run of the server's |
+| ^68 | invariant | the groups partition the notifications shown, in order; each one reason and subject |
+| ^69 | invariant | no row is from a muted account |
+| ^70 | invariant | `seenAt` never decreases and never passes a notification that hasn't been on screen |
+| ^71 | invariant | at most one unread poll, none signed out; the badge is the unread count shown |
 -/
 
 @[expose] public section
@@ -63,6 +75,9 @@ place ^1 window "Sky window" where
 
 place ^14 feedPlace "The feed" in ^1 where
   does "The home feed in a virtual list: one row per post (avatar, name, handle, time, the text wrapped, up to four images, Reposted by and Replying to, other embeds as a line, the counts), then the end row. Cairn owns its offset and lays only the rows near the view; the wheel, the trackpad and the page keys move it."
+
+place ^60 notesPlace "The notifications" in ^1 where
+  does "The notifications in a virtual list, newest first: likes, reposts and follows of the same post (or of you) next to each other make one row (\"Alice, Bob and 3 others liked your post\"); mentions, replies and quotes a row each; a dot on the ones newer than what is marked seen. Then the end row. The Notifications button in the header shows the unread count."
 
 /-! ## Moves -/
 
@@ -240,6 +255,59 @@ move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^14 where
     post s' := ∀ it, s.rows.item? k = some it →
       s'.acts.muted (muteTarget s it) = !s.acts.muted (muteTarget s it)
     sound := by intro s k h it hit; exact act_post h it hit
+move ^61 notesTab (s : State) "Notifications" in ^1 where
+  does "While signed in, on the feed, press Notifications (it shows the unread count, if there is one)."
+  sees "The notifications show, and Sky asks for their head. Once rows have come into view, Sky marks them seen."
+  enabled := live s.session && s.tab == .home
+  on press
+    emit := s.step .openNotes
+    post s' := s'.tab = .notifications ∧ s'.feed = s.feed
+    sound := by intro s h; exact openNotes_post (bool_left h)
+
+move ^62 homeTab (s : State) "Home" in ^1 where
+  does "While the notifications show, press Home."
+  sees "The feed shows again, where it was."
+  enabled := live s.session && s.tab == .notifications
+  on press
+    emit := s.step .openHome
+    post s' := s'.tab = .home ∧ s'.feed = s.feed
+    sound := by intro s h; exact openHome_post (bool_left h)
+
+move ^63 noteRefreshMove (s : State) "Refresh the notifications" in ^1 where
+  does "While the notifications show, press Refresh."
+  sees "Sky asks for the head of the notifications; new ones are put on top (grouped with the row below when they can be), or the list is replaced if more than a page arrived. The unread count is polled after."
+  enabled := canNoteRefresh s && s.tab == .notifications
+  on press
+    emit := s.step .noteRefresh
+    post s' := s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.refresh = some s.nextCall
+    sound := by intro s h; exact noteRefresh_post (bool_left h)
+
+move ^64 reachNotesEnd (s : State) "Reach the end of the notifications" in ^60 where
+  does "Scroll the notifications to their end, while there are older ones."
+  sees "Loading… shows at the end, and the next page is appended below; if a refresh replaced the list first, the page is dropped."
+  enabled := canNoteMore s && !s.notes.moreFailed
+  on appear
+    emit := s.step .noteMore
+    post s' := s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.loadMore.isSome
+    sound := by intro s h; exact noteMore_post (bool_left h)
+
+move ^65 retryNotes (s : State) "Retry loading more notifications" in ^60 where
+  does "After loading more notifications failed, press Retry at the end of the list."
+  sees "Sky asks for the next page again."
+  enabled := canNoteMore s && s.notes.moreFailed
+  on press
+    emit := s.step .noteMore
+    post s' := s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.loadMore.isSome
+    sound := by intro s h; exact noteMore_post (bool_left h)
+
+move ^66 noteRowMove (s : State) (k : Nat) "A notification" in ^60 where
+  does "Scroll a row of the notifications into view."
+  sees "Sky marks the notifications seen up to the row's newest, at once on screen (the dots go), and tells the server (updateSeen) in the background; if the server refuses, the dots come back and the problem line says why."
+  enabled := live s.session && s.tab == .notifications && s.noteGroups.any (·.key == k)
+  on appear
+    emit := s.step (.noteAppear k)
+    post s' := s.notes.seen.1.mark ≤ s'.notes.seen.1.mark ∧ s'.feed = s.feed
+    sound := by intro s k h; exact noteAppear_post (bool_left (bool_left h)) k
 
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }
@@ -265,7 +333,13 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (likeMove.preserves _ fun s _ _ h => hp s _ h)
   (Move.all_cons (repostMove.preserves _ fun s _ _ h => hp s _ h)
   (Move.all_cons (followMove.preserves _ fun s _ _ h => hp s _ h)
-  (Move.all_cons (muteMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil))))))))))))))))
+  (Move.all_cons (muteMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (notesTab.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (homeTab.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (noteRefreshMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (reachNotesEnd.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (retryNotes.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (noteRowMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil))))))))))))))))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
@@ -404,6 +478,45 @@ invariant ^43 actsGone "Signed out, no acts held" for machine where
   init := fun _ => rfl
   step := fun s a h => update_inv (P := ActsGone) (fun s c _ => step_actsGone s c) s a h
   receive := fun s m _ => step_actsGone s (.msg m)
+invariant ^67 notesContiguous "The notifications are a run of the server's" for machine where
+  does "The notifications are cairn_atproto's Paged list (cairn#250), the same as the feed: a contiguous, newest-first run of the server's notifications with no duplicates, staying one when a page is appended, a head page arrives or new notifications arrive on the server (cairn_atproto^26); a stale page changes nothing (^27), the cursor is kept (^28), and a refresh racing a load-more ends the same either way (^29). The fuzz checks Sky's list against the fake server's after every step."
+  holds _s := Paged.Contiguous Notification
+  init := Paged.contiguous
+  step := fun _ _ _ => Paged.contiguous
+  receive := fun _ _ _ => Paged.contiguous
+
+invariant ^68 groupsInvariant "The groups partition the notifications" for machine where
+  does "The rows are the notifications shown, in order, cut into runs: flattened, the groups are exactly the list (less muted accounts'); every member of a group has its reason and subject, and only likes, reposts and follows group; no two groups next to each other could have been one."
+  holds _s := GroupsPartition
+  init := groupsPartition
+  step := fun _ _ _ => groupsPartition
+  receive := fun _ _ _ => groupsPartition
+
+invariant ^69 noMutedNotes "No row from a muted account" for machine where
+  does "No notification from a muted account is in any row."
+  holds s := NoMutedRow s
+  init := noMutedRow _
+  step := fun _ _ _ => noMutedRow _
+  receive := fun _ _ _ => noMutedRow _
+
+theorem seenOk_any (s : State) : SeenOk s.notes.seen.1 := s.notes.seen.2
+
+invariant ^70 seenInvariant "Seen only once on screen" for machine where
+  does "Sky's seen marker is a one-key optimistic entry (Cairn.Optimistic): what shows as seen moves at once, and updateSeen goes to the server in the background, read back when its answer is lost, rolled back when refused. Every updateSeen Sky sends is at least the one before it and at most the mark, and the mark only rises when a row of the list comes into view, to that row's newest notification. So seenAt never decreases and never passes a notification that hasn't been on screen. The fuzz checks the fake server's seenAt against the rows that have been in view."
+  holds s := SeenOk s.notes.seen.1 ∧ SeenMonotone ∧ SeenOnScreen
+  init := ⟨seenOk_any _, seenMonotone, seenOnScreen⟩
+  step := fun s _ _ => ⟨seenOk_any _, seenMonotone, seenOnScreen⟩
+  receive := fun s _ _ => ⟨seenOk_any _, seenMonotone, seenOnScreen⟩
+
+theorem notesOut_step (s : State) (c : Cmd) (_h : NotesSignedOut s) : NotesSignedOut (s.step c).1 :=
+  step_notesOut s c
+
+invariant ^71 pollInvariant "At most one unread poll" for machine where
+  does "Sky polls the unread count every minute, after a refresh of the notifications, at sign-in and once updateSeen is answered, but never with a poll in flight (one due then goes once it answers), so at most one is; signed out it polls nothing, and the notes hold no notifications and wait on no call. The badge (the Notifications button's count; the Dock's in cairn#255) is the last poll's count less the notifications marked seen since it was sent, and none at 0."
+  holds s := NotesSignedOut s ∧ PollOnce ∧ BadgeIsCount s
+  init := ⟨notesOut_initial, pollOnce, badgeIsCount _⟩
+  step := fun s a h => ⟨update_inv (P := NotesSignedOut) notesOut_step s a h.1, pollOnce, badgeIsCount _⟩
+  receive := fun s m _ => ⟨step_notesOut s (.msg m), pollOnce, badgeIsCount _⟩
 
 def claimInfos : List ClaimInfo := claims%
 

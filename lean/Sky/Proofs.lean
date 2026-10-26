@@ -94,6 +94,76 @@ theorem Q.inv {s : State} (h : Q [] s) : Inv s :=
   ⟨h.rids, lmOk_mono (fun x hx => hx.resolve_right (answered_nil x)) h.lm,
    rfOk_mono (fun x hx => hx.resolve_right (answered_nil x)) h.rf, h.dis, h.cur⟩
 
+/-! ## The notes' answers touch only the notes and the problem line -/
+
+/-- `t` is `s` but for its notes and its problem line. -/
+def NotesOnly (s t : State) : Prop :=
+  ∃ (n : Notes) (p : Option String), t = { s with notes := n, problem := p }
+
+theorem NotesOnly.refl (s : State) : NotesOnly s s := ⟨s.notes, s.problem, rfl⟩
+
+theorem NotesOnly.trans {a b c : State} (h1 : NotesOnly a b) (h2 : NotesOnly b c) :
+    NotesOnly a c := by
+  obtain ⟨n1, p1, rfl⟩ := h1; obtain ⟨n2, p2, rfl⟩ := h2; exact ⟨n2, p2, rfl⟩
+
+theorem NotesOnly.with (s : State) (n : Notes) (p : Option String) :
+    NotesOnly s { s with notes := n, problem := p } := ⟨n, p, rfl⟩
+
+/-- Effects that are all timers. -/
+def Timers (es : List Effect) : Prop := ∀ e ∈ es, ∃ n ms, e = .setTimer n ms
+
+theorem timers_nil : Timers [] := fun _ h => by simp at h
+
+theorem timers_append {a b : List Effect} (ha : Timers a) (hb : Timers b) : Timers (a ++ b) :=
+  fun e h => (List.mem_append.mp h).elim (ha e) (hb e)
+
+theorem seenAct_only (acc : State × List Effect) (a : Cairn.Optimistic.Act Nat) :
+    NotesOnly acc.1 (seenAct acc a).1 ∧ (Timers acc.2 → Timers (seenAct acc a).2) := by
+  cases a with
+  | retryIn ms =>
+    refine ⟨NotesOnly.refl _, fun h => timers_append h ?_⟩
+    intro e he; simp only [List.mem_singleton] at he; exact ⟨_, _, he⟩
+  | rolledBack r => exact ⟨NotesOnly.with _ _ _, id⟩
+  | write n v => exact ⟨NotesOnly.with _ _ _, id⟩
+  | read n => exact ⟨NotesOnly.with _ _ _, id⟩
+
+theorem foldl_seenAct : ∀ (as : List (Cairn.Optimistic.Act Nat)) (acc : State × List Effect),
+    Timers acc.2 → NotesOnly acc.1 (as.foldl seenAct acc).1 ∧ Timers (as.foldl seenAct acc).2
+  | [], _, h => ⟨NotesOnly.refl _, h⟩
+  | a :: as, acc, h => by
+    have h1 := seenAct_only acc a
+    have h2 := foldl_seenAct as (seenAct acc a) (h1.2 h)
+    exact ⟨h1.1.trans h2.1, h2.2⟩
+
+theorem hearSeen_only (s : State) (e : SeenEv) :
+    NotesOnly s (hearSeen s e).1 ∧ Timers (hearSeen s e).2 := by
+  have := foldl_seenAct (s.notes.seen.hear e).2
+    ({ s with notes := { s.notes with seen := (s.notes.seen.hear e).1 } }, []) timers_nil
+  exact ⟨(NotesOnly.with s _ s.problem).trans this.1, this.2⟩
+
+theorem hear_after (s : State) (n : Notes) (p : Option String) (e : SeenEv) :
+    NotesOnly s (hearSeen { s with notes := n, problem := p } e).1 ∧
+      Timers (hearSeen { s with notes := n, problem := p } e).2 :=
+  ⟨(NotesOnly.with s n p).trans (hearSeen_only _ e).1, (hearSeen_only _ e).2⟩
+
+theorem noteAnswer_only (s : State) (id : Nat) (a : Answer) :
+    NotesOnly s (noteAnswer s id a).1 ∧ Timers (noteAnswer s id a).2 := by
+  unfold noteAnswer
+  repeat' (first | (dsimp only; done) | split | (dsimp only; split) | intro)
+  all_goals first
+    | exact ⟨NotesOnly.with _ _ _, timers_nil⟩
+    | exact hear_after _ _ _ _
+    | exact ⟨NotesOnly.refl _, timers_nil⟩
+
+theorem Q.notesOnly {rest : List Out} {s t : State} (h : Q rest s) (ht : NotesOnly s t) :
+    Q rest t := by
+  obtain ⟨n, p, rfl⟩ := ht
+  exact ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
+
+theorem Inv.notesOnly {s t : State} (h : Inv s) (ht : NotesOnly s t) : Inv t := by
+  obtain ⟨n, p, rfl⟩ := ht
+  exact ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
+
 /-! ## The feed's handlers -/
 
 theorem cursorKept_empty : CursorKept ({} : Feed) := Paged.cursorKept_empty
@@ -320,7 +390,19 @@ theorem handleOut_Q {s : State} {es : List Effect} {o : Out} {rest : List Out}
     have h' := h.tail fun _ _ e' => by cases e'
     exact ⟨h'.rids, h'.lm, h'.rf, h'.dis, h'.cur⟩
   | cancel rid => exact h.tail fun _ _ e => by cases e
-  | answer id a => exact onAnswer_Q h
+  | answer id a =>
+    show Q rest (answerCall s id a).1
+    unfold answerCall
+    split
+    · next hn =>
+      simp only [State.noteCall, State.feedCall, Bool.and_eq_true, Bool.not_eq_true',
+        Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hn
+      refine (h.tail fun x a' e => ?_).notesOnly (noteAnswer_only s id a).1
+      cases e
+      refine ⟨fun l c e => ?_, fun r e => ?_⟩
+      · intro hx; subst hx; apply hn.2.1; simp [e]
+      · intro hx; subst hx; apply hn.2.2; simp [e]
+    · exact onAnswer_Q h
   | event e =>
     have h' := h.tail fun _ _ e' => by cases e'
     simp only [handleOut]
@@ -489,6 +571,84 @@ theorem appearRow_acts (s : State) (k : Nat) : (appearRow s k).1.acts = s.acts :
 theorem appearRow_inv {s : State} (h : Inv s) (k : Nat) : Inv (appearRow s k).1 :=
   h.other (appearRow_core s k).1 (appearRow_core s k).2.1 (appearRow_core s k).2.2.1
 
+/-! ### The notes' calls keep `Inv` -/
+
+/-- `Inv` survives the notes changing and the call ids moving on. -/
+theorem Inv.bump {s : State} (h : Inv s) (n : Notes) (k : Nat) (hk : s.nextCall ≤ k) :
+    Inv { s with nextCall := k, notes := n } := by
+  refine ⟨h.rids, ?_, ?_, h.dis, h.cur⟩
+  · have := h.lm; unfold LmOk at this ⊢; split at this
+    · next e => simp only [e]; exact ⟨this.1, this.2.1, this.2.2.1, by omega⟩
+    · next e => simp only [e]
+  · have := h.rf; unfold RfOk at this ⊢; split at this
+    · next e => simp only [e]; exact ⟨this.1, by omega⟩
+    · next e => simp only [e]
+
+theorem noteCall_inv {s : State} (h : Inv s) (f : Nat → Notes → Notes) (c : Call) :
+    Inv (Sky.noteCall s f c).1 :=
+  drive_inv_of (h.bump _ _ (Nat.le_succ _)) _ trivial
+
+theorem sendSeen_inv (acc : State × List Effect) (h : Inv acc.1) (a : Cairn.Optimistic.Act Nat) :
+    Inv (sendSeen acc a).1 := by
+  cases a with
+  | write k v => dsimp only [sendSeen]; exact noteCall_inv h _ _
+  | read k => dsimp only [sendSeen]; exact noteCall_inv h _ _
+  | _ => exact h
+
+theorem foldl_sendSeen_inv : ∀ (as : List (Cairn.Optimistic.Act Nat)) (acc : State × List Effect),
+    Inv acc.1 → Inv (as.foldl sendSeen acc).1
+  | [], _, h => h
+  | a :: as, acc, h => foldl_sendSeen_inv as _ (sendSeen_inv acc h a)
+
+theorem startPoll_inv {s : State} (h : Inv s) : Inv (startPoll s).1 := by
+  unfold startPoll; split
+  · exact noteCall_inv h _ _
+  · exact h.notesOnly (NotesOnly.with _ _ s.problem)
+
+theorem flushNotes_inv {s : State} (h : Inv s) : Inv (flushNotes s).1 := by
+  unfold flushNotes; split
+  · have h1 := foldl_sendSeen_inv s.notes.todo ({ s with notes := { s.notes with todo := [] } }, [])
+      (h.notesOnly (NotesOnly.with _ _ s.problem))
+    dsimp only; split
+    · exact startPoll_inv h1
+    · exact h1
+  · exact h
+
+theorem hearSeen_inv {s : State} (h : Inv s) (e : SeenEv) : Inv (hearSeen s e).1 :=
+  h.notesOnly (hearSeen_only s e).1
+
+theorem startNoteRefresh_inv {s : State} (h : Inv s) : Inv (startNoteRefresh s).1 := by
+  unfold startNoteRefresh; split
+  · split
+    · exact noteCall_inv h _ _
+    · exact h
+  · exact h
+
+theorem startNoteMore_inv {s : State} (h : Inv s) : Inv (startNoteMore s).1 := by
+  unfold startNoteMore; split
+  · split
+    · exact noteCall_inv h _ _
+    · exact h
+  · exact h
+
+theorem markSeenNow_inv {s : State} (h : Inv s) : Inv (markSeenNow s).1 := by
+  unfold markSeenNow; split
+  · have := (foldl_seenAct s.notes.seen.markSeen.2
+      ({ s with notes := { s.notes with seen := s.notes.seen.markSeen.1 } }, []) timers_nil).1
+    exact flushNotes_inv (h.notesOnly ((NotesOnly.with _ _ s.problem).trans this))
+  · exact h
+
+theorem noteAppear_inv {s : State} (h : Inv s) (k : Nat) : Inv (noteAppear s k).1 := by
+  unfold noteAppear; split
+  · exact h
+  · split
+    · exact markSeenNow_inv (h.notesOnly (NotesOnly.with _ _ s.problem))
+    · exact h
+
+theorem openNotes_inv {s : State} (h : Inv s) : Inv (openNotes s).1 := by
+  unfold openNotes
+  exact markSeenNow_inv (startNoteRefresh_inv (h.other rfl rfl rfl))
+
 theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   cases c with
   | signIn =>
@@ -521,6 +681,11 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
       · split <;> exact h.other rfl rfl rfl
       · exact h
     · exact h
+  | openNotes => exact openNotes_inv h
+  | openHome => exact h.other rfl rfl rfl
+  | noteRefresh => exact startNoteRefresh_inv h
+  | noteMore => exact startNoteMore_inv h
+  | noteAppear k => exact noteAppear_inv h k
   | msg m =>
     simp only [step0]
     cases m with
@@ -545,20 +710,28 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
         | openHelp => exact hb
         | openPost => exact hb
       · split
-        · refine driveSession_inv ?_ _ trivial; exact h.other rfl rfl rfl
+        · refine flushNotes_inv (driveSession_inv ?_ _ trivial); exact h.other rfl rfl rfl
         · split
           · exact h.other rfl rfl rfl
           · exact h
     | timer n =>
       simp only [receive0]
-      split <;> exact h.other rfl rfl rfl
+      split
+      · exact h.other rfl rfl rfl
+      · split
+        · exact flushNotes_inv (hearSeen_inv h _)
+        · exact h.other rfl rfl rfl
     | clock t => exact h.other rfl rfl rfl
-    | sub sb e => cases e <;> first | exact h.other rfl rfl rfl | exact h
+    | sub sb e =>
+      cases e
+      case tick => exact flushNotes_inv (h.notesOnly (NotesOnly.with _ _ s.problem))
+      all_goals first | exact h.other rfl rfl rfl | exact h
 
 theorem settle_fst (s : State) :
     (settle s).1 = if live s.session then s
       else { s with feed := {}, session := { s.session with inflight := [], held := [] },
-                    acts := {} } := by
+                    acts := {},
+                    notes := { did := s.notes.did, seen := s.notes.seen.reset, gen := s.notes.gen }, tab := .home } := by
   unfold settle; split <;> simp_all [cancel_all]
 
 theorem settle_inv {s : State} (h : Inv s) : Inv (settle s).1 := by
@@ -598,10 +771,12 @@ structure Core (s t : State) : Prop where
   identifier : t.identifier = s.identifier
   service : t.service = s.service
   accountOpen : t.accountOpen = s.accountOpen
+  notes : t.notes = s.notes
+  tab : t.tab = s.tab
 
 theorem tidy_core (s : State) : Core s (tidy s).1 := by
   obtain ⟨r, g, f, m, im, e⟩ := tidy_shape s
-  rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 theorem tidy_inv {s : State} (h : Inv s) : Inv (tidy s).1 :=
   h.other (tidy_core s).session (tidy_core s).feed (tidy_core s).nextCall
@@ -613,7 +788,7 @@ theorem tidy_signedOut {s : State} (h : SignedOutEmpty s) : SignedOutEmpty (tidy
 /-! ## Sending the acts' calls -/
 
 /-- `Inv` holds with any later next call id. -/
-theorem Inv.bump {s : State} (h : Inv s) (n : Nat) (hn : s.nextCall ≤ n) :
+theorem Inv.bumpCall {s : State} (h : Inv s) (n : Nat) (hn : s.nextCall ≤ n) :
     Inv { s with nextCall := n } := by
   obtain ⟨a, b, c, d, f⟩ := h
   refine ⟨a, ?_, ?_, d, f⟩
@@ -631,7 +806,7 @@ theorem flushJobs_inv : ∀ (js : List Job) {s : State}, Inv s → Inv (flushJob
     simp only [flushJobs]
     apply flushJobs_inv js
     refine drive_inv_of ?_ _ trivial
-    have hb := h.bump (s.nextCall + 1) (Nat.le_succ _)
+    have hb := h.bumpCall (s.nextCall + 1) (Nat.le_succ _)
     exact hb.other rfl rfl rfl
 
 theorem flush_inv {s : State} (h : Inv s) : Inv (flush s).1 := by
@@ -726,7 +901,12 @@ theorem handleOut_same (acc : State × List Effect) (o : Out) : Same acc.1 (hand
   | send => exact Same.refl _
   | forget => exact ⟨rfl, rfl, rfl⟩
   | cancel => exact Same.refl _
-  | answer id a => exact onAnswer_same _ _ _
+  | answer id a =>
+    show Same acc.1 (answerCall acc.1 id a).1
+    unfold answerCall; split
+    · obtain ⟨n, p, e⟩ := (noteAnswer_only acc.1 id a).1
+      rw [e]; exact ⟨rfl, rfl, rfl⟩
+    · exact onAnswer_same _ _ _
   | event e => cases e <;> first | exact ⟨rfl, rfl, rfl⟩ | (rename_i x; cases x <;> exact ⟨rfl, rfl, rfl⟩)
 
 theorem handleOut_quiet (acc : State × List Effect) (o : Out) (h : ∀ x a, o ≠ .answer x a) :

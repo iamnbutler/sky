@@ -2,6 +2,7 @@ module
 
 public import Sky.Feed
 public import Sky.Acts
+public import Sky.Notifications
 public import Sky.SessionFacts
 public import Cairn.Text.Field
 public import Cairn.UI.Images
@@ -143,6 +144,12 @@ def change (old new : List FeedItem) : Change :=
   else if new.take old.length = old then .appended
   else .replaced
 
+/-- Which list the window shows. -/
+inductive Tab where
+  | home
+  | notifications
+deriving Repr, DecidableEq, Inhabited
+
 structure State where
   session : Session.State := Session.init
   feed : Feed := {}
@@ -181,6 +188,10 @@ structure State where
   now : Time := {}
   /-- Likes, reposts, follows and mutes (`Sky.Acts`, cairn#252). -/
   acts : Acts := {}
+  /-- The notifications: the list, the seen marker, the unread count (`Sky.Notifications`). -/
+  notes : Notes := {}
+  /-- Which list the window shows. -/
+  tab : Tab := .home
 deriving Repr, Inhabited
 
 /-! ## Reading the state -/
@@ -364,13 +375,115 @@ def actsAnswer (s : State) (id : Nat) (a : Answer) : Acts :=
 /-- The answer to call `id`: the feed's, then the acts'. -/
 def onAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
   ({ (onAnswer0 s id a).1 with acts := actsAnswer s id a }, (onAnswer0 s id a).2)
+/-! ## Notifications' answers
+
+Answers come inside the fold over the session's outputs, where Sky only records them: the list
+(`Paged.gotLoadMore`, `Paged.gotRefresh`), the unread count, and what the seen key hears. The
+writes and reads the seen key asks for, and a poll that is due, are sent once the fold is done
+(`flushNotes`). The notes never withdraw a call: a load-more a refresh forgot is answered into
+nothing (`Paged.gotLoadMore` ignores an answer to a call it doesn't wait on). -/
+
+/-- Notifications per page. -/
+def notePageSize : Nat := 30
+
+/-- The timer for the seen key's next read, after one failed. -/
+def seenRetryTimer : String := "seen-retry"
+
+/-- A call's answer, read as a page of notifications; and what went wrong, if it did. -/
+def readNotes : Answer → Option NotificationPage × Option String
+  | .reply r =>
+    match Outcome.ofReply NotificationPage.ofJson r with
+    | .ok p => (some p, none)
+    | .malformed st => (none, some s!"{st}: not a page of notifications")
+    | _ => (none, some (describe r))
+  | .signedOut => (none, none)
+
+/-- The seen key's actions: the retry timer and a rollback's line now; writes and reads queued. -/
+def seenAct (acc : State × List Effect) : Cairn.Optimistic.Act Nat → State × List Effect
+  | .retryIn ms => (acc.1, acc.2 ++ [.setTimer seenRetryTimer ms])
+  | .rolledBack r =>
+    ({ acc.1 with problem := some ("Couldn't mark notifications read: " ++ rollbackWords r) }, acc.2)
+  | a => ({ acc.1 with notes := { acc.1.notes with todo := acc.1.notes.todo ++ [a] } }, acc.2)
+
+/-- The seen key hears `e`. -/
+def hearSeen (s : State) (e : SeenEv) : State × List Effect :=
+  (s.notes.seen.hear e).2.foldl seenAct
+    ({ s with notes := { s.notes with seen := (s.notes.seen.hear e).1 } }, [])
+
+/-- A write's answer, as the seen key hears it. -/
+def writeEv (k : Nat) (now : Nat) : WriteOutcome → SeenEv
+  | .acked => .acked k
+  | o@(.refused ..) => .refused k (o.describe now)
+  | .lost _ => .lost k
+  | .notSent => .refused k "not signed in"
+
+/-- Whether a refresh's answer starts a new list: the first notifications, or a head page that
+replaced the list rather than putting new ones on top. The view shows a new list then, at the
+top (the runtime's anchor would keep the old first row still). -/
+def newList (old new : Paged Notification) : Bool :=
+  new.items != old.items && (old.items.isEmpty || !old.items.isSuffixOf new.items)
+
+/-- The answer to one of the notes' calls. -/
+def noteAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
+  let n := s.notes
+  if n.list.loadMore.map (·.1) = some id then
+    let (page, prob) := readNotes a
+    let s := { s with notes := { n with list := n.list.gotLoadMore id (page.map (·.page)),
+                                        moreFailed := prob.isSome } }
+    match page.bind (·.seenAt) with
+    | some t => hearSeen s (.seen (msOf t))
+    | none => (s, [])
+  else if n.list.refresh = some id then
+    let (page, prob) := readNotes a
+    let l := n.list.gotRefresh id (page.map (·.page))
+    let s := { s with notes := { n with list := l, pollDue := true, gen := n.gen + if newList n.list l then 1 else 0 },
+                      problem := match prob with
+                        | some p => some ("Couldn't load notifications: " ++ p)
+                        | none => s.problem }
+    match page.bind (·.seenAt) with
+    | some t => hearSeen s (.seen (msOf t))
+    | none => (s, [])
+  else if n.poll = some id then
+    let n := { n with poll := none }
+    match a with
+    | .reply r =>
+      match Outcome.ofReply unreadCountOf r with
+      | .ok c => ({ s with notes := { n with unread := c, unreadBase := n.pollBase } }, [])
+      | _ => ({ s with notes := n }, [])
+    | .signedOut => ({ s with notes := n }, [])
+  else
+    match n.seenCalls.lookup id with
+    | some c =>
+      let s := { s with notes := { n with seenCalls := n.seenCalls.filter (·.1 != id), pollDue := true } }
+      match c with
+      | .write k => hearSeen s (writeEv k (s.now.wall / 1000).toNat (WriteOutcome.ofAnswer a))
+      | .read k =>
+        match (readNotes a).1 with
+        | some p => hearSeen s (.read k ((p.seenAt.map msOf).getD 0))
+        | none => hearSeen s (.readFailed k)
+    | none => (s, [])
+
+/-- Whether call `id` is the feed's load-more or refresh. -/
+def State.feedCall (s : State) (id : Nat) : Bool :=
+  s.feed.loadMore.map (·.1) == some id || s.feed.refresh == some id
+
+/-- Whether call `id` is one of the notes' (and not the feed's). -/
+def State.noteCall (s : State) (id : Nat) : Bool := s.notes.calls.contains id && !s.feedCall id
+
+/-- The answer to call `id`: the notes', or the feed's. -/
+def answerCall (s : State) (id : Nat) (a : Answer) : State × List Effect :=
+  if s.noteCall id then noteAnswer s id a else onAnswer s id a
 
 def onEvent (s : State) : Session.Event → State × List Effect
   | .signInFailed r => ({ s with problem := some (signInWords r) }, [])
   | .refreshFailed r => ({ s with problem := some ("Couldn't reach the service: " ++ describe r) }, [])
   | .signedOut .refused =>
     ({ s with problem := some "Your session ended. Sign in again." }, [])
-  | .signedIn a => sendOwn { s with problem := none } .save (.writeFile accountPath (accountJson s.host a.handle))
+  | .signedIn a =>
+    sendOwn { s with problem := none,
+                     notes := if a.did = s.notes.did then { s.notes with pollDue := true }
+                              else { did := a.did, pollDue := true, gen := s.notes.gen + 1 } }
+      .save (.writeFile accountPath (accountJson s.host a.handle))
   | _ => (s, [])
 
 def handleOut (acc : State × List Effect) : Out → State × List Effect
@@ -379,7 +492,9 @@ def handleOut (acc : State × List Effect) : Out → State × List Effect
     ({ acc.1 with forgetting := sessionId rid :: acc.1.forgetting },
      acc.2 ++ [.request (sessionId rid) (.forgetSecret item)])
   | .cancel rid => (acc.1, acc.2 ++ [.cancelRequest (sessionId rid)])
-  | .answer id a => let (s, es) := onAnswer acc.1 id a; (s, acc.2 ++ es)
+  | .answer id a =>
+    let (s, es) := answerCall acc.1 id a
+    (s, acc.2 ++ es)
   | .event e => let (s, es) := onEvent acc.1 e; (s, acc.2 ++ es)
 
 def handleOuts (s : State) (outs : List Out) : State × List Effect := outs.foldl handleOut (s, [])
@@ -414,6 +529,97 @@ def startLoadMore (s : State) : State × List Effect :=
                    moreFailed := false }
       (.call id (Call.getTimeline (some pageSize) (some c)))
   | _, _ => (s, [])
+
+/-! ## Notifications' calls -/
+
+/-- Make session call `c` as Sky's next call id, with `f` recording it in the notes. -/
+def noteCall (s : State) (f : Nat → Notes → Notes) (c : Call) : State × List Effect :=
+  drive { s with nextCall := s.nextCall + 1, notes := f s.nextCall s.notes } (.call s.nextCall c)
+
+/-- Send a write or a read the seen key asked for. A write of `v` is `updateSeen` at `v`; a read
+is the first page of notifications, which says the account's `seenAt`. -/
+def sendSeen (acc : State × List Effect) : Cairn.Optimistic.Act Nat → State × List Effect
+  | .write k v =>
+    let (s, es) := noteCall acc.1 (fun id n => { n with seenCalls := (id, .write k) :: n.seenCalls })
+      (Call.updateSeen (formatDatetime v))
+    (s, acc.2 ++ es)
+  | .read k =>
+    let (s, es) := noteCall acc.1 (fun id n => { n with seenCalls := (id, .read k) :: n.seenCalls })
+      (Call.listNotifications (some 1) none)
+    (s, acc.2 ++ es)
+  | _ => acc
+
+/-- Poll the unread count, unless a poll is in flight: at most one. A poll due while one is in
+flight stays due and goes once that one answers (an acked seen write makes one due). -/
+def startPoll (s : State) : State × List Effect :=
+  if live s.session && s.notes.poll.isNone then
+    noteCall s (fun id n => { n with poll := some id, pollBase := n.seen.1.entry.server,
+                                     pollDue := false }) Call.getUnreadCount
+  else ({ s with notes := { s.notes with pollDue := s.notes.pollDue && live s.session } }, [])
+
+/-- Send what the notes queued in this step: the seen key's writes and reads, and a poll that is
+due. Signed out, nothing (and `settle` empties the notes). -/
+def flushNotes (s : State) : State × List Effect :=
+  if live s.session then
+    let (s₁, e₁) := s.notes.todo.foldl sendSeen ({ s with notes := { s.notes with todo := [] } }, [])
+    if s₁.notes.pollDue then
+      let (s₂, e₂) := startPoll s₁
+      (s₂, e₁ ++ e₂)
+    else (s₁, e₁)
+  else (s, [])
+
+/-- Ask for the head of the notifications. A load-more in flight is forgotten (its answer will
+change nothing). -/
+def startNoteRefresh (s : State) : State × List Effect :=
+  if live s.session then
+    match s.notes.list.beginRefresh s.nextCall with
+    | some (l, _) =>
+      noteCall s (fun _ n => { n with list := l }) (Call.listNotifications (some notePageSize) none)
+    | none => (s, [])
+  else (s, [])
+
+/-- Whether the notifications can load more. -/
+def canNoteMore (s : State) : Bool := live s.session && s.notes.list.canLoadMore
+
+/-- Ask for the notifications after the cursor the list holds. -/
+def startNoteMore (s : State) : State × List Effect :=
+  if live s.session then
+    match s.notes.list.beginLoadMore s.nextCall with
+    | some (l, c) =>
+      noteCall s (fun _ n => { n with list := l, moreFailed := false })
+        (Call.listNotifications (some notePageSize) (some c))
+    | none => (s, [])
+  else (s, [])
+
+/-- With the list on screen: mark seen up to the newest notification that has appeared. -/
+def markSeenNow (s : State) : State × List Effect :=
+  if live s.session && s.tab == .notifications then
+    let (s₁, e₁) := s.notes.seen.markSeen.2.foldl seenAct
+      ({ s with notes := { s.notes with seen := s.notes.seen.markSeen.1 } }, [])
+    let (s₂, e₂) := flushNotes s₁
+    (s₂, e₁ ++ e₂)
+  else (s, [])
+
+/-- Accounts whose notifications are left out: those the mute table shows muted (`Sky.Acts`). -/
+def State.muted (s : State) (did : String) : Bool := s.acts.muted did
+
+/-- The rows of the notifications list. -/
+def State.noteGroups (s : State) : List Group := shownGroups s.muted s.notes.list.items
+
+/-- The row with key `k` came into view: the mark moves up to its newest notification, and the
+list is marked seen. Only while the list shows (an appear from a frame before Home is late). -/
+def noteAppear (s : State) (k : Nat) : State × List Effect :=
+  if s.tab != .notifications then (s, []) else
+  match s.noteGroups.find? (·.key == k) with
+  | some g =>
+    markSeenNow { s with notes := { s.notes with seen := s.notes.seen.appear (newestMs g.members) } }
+  | none => (s, [])
+
+/-- Show the notifications: load their head, and mark seen what has appeared. -/
+def openNotes (s : State) : State × List Effect :=
+  let (s₁, e₁) := startNoteRefresh { s with tab := .notifications }
+  let (s₂, e₂) := markSeenNow s₁
+  (s₂, e₁ ++ e₂)
 
 def signedInEvent : Out → Bool
   | .event (.signedIn _) => true
@@ -534,13 +740,21 @@ def receive0 (s : State) : Msg → State × List Effect
       | _ => (s, [])
     | none =>
       if id % 2 = 0 then
-        driveSession { s with forgetting := s.forgetting.filter (· != id) } (.reply (id / 2) r)
+        let (s₁, e₁) := driveSession { s with forgetting := s.forgetting.filter (· != id) } (.reply (id / 2) r)
+        let (s₂, e₂) := flushNotes s₁
+        (s₂, e₁ ++ e₂)
       else if s.images.waiting id then ({ s with images := s.images.receive id r }, [])
       else (s, [])
-  | .timer n => if n = slowTimer then ({ s with slow := true }, [])
+  | .timer n =>
+    if n = slowTimer then ({ s with slow := true }, [])
+    else if n = seenRetryTimer then
+      let (s₁, e₁) := hearSeen s .retry
+      let (s₂, e₂) := flushNotes s₁
+      (s₂, e₁ ++ e₂)
     else ({ s with acts := s.acts.timer (ctxOf s) n }, [])
   | .clock t => ({ s with now := t }, [])
   | .sub _ (.evicted src) => ({ s with images := (s.images.evicted src).1 }, (s.images.evicted src).2)
+  | .sub _ .tick => flushNotes { s with notes := { s.notes with pollDue := true } }
   | _ => (s, [])
 
 /-- Signed out (no live session): the feed and the acts are emptied and every call the session
@@ -548,7 +762,8 @@ has taken on cancelled (the session's `Input.cancel`), the acts' with the rest. 
 def settle (s : State) : State × List Effect :=
   if live s.session then (s, [])
   else ({ s with feed := {}, session := (Session.step s.session (.cancel (pids s.session))).1,
-                 acts := {} },
+                 acts := {},
+                 notes := { did := s.notes.did, seen := s.notes.seen.reset, gen := s.notes.gen }, tab := .home },
         cancelEffects (Session.step s.session (.cancel (pids s.session))).2)
 
 /-- The rows anew, for a feed replaced or emptied: a new list, at the top; every image load
@@ -650,6 +865,16 @@ inductive Cmd where
   | showNew
   /-- Like, repost, follow or mute from the row with key `k`. -/
   | act (kind : Kind) (k : Nat)
+  /-- Show the notifications. -/
+  | openNotes
+  /-- Show the home feed. -/
+  | openHome
+  /-- Refresh the notifications. -/
+  | noteRefresh
+  /-- Load more notifications. -/
+  | noteMore
+  /-- The notifications row with key `k` came into view. -/
+  | noteAppear (k : Nat)
   | msg (m : Msg)
 
 def step0 (s : State) : Cmd → State × List Effect
@@ -671,6 +896,11 @@ def step0 (s : State) : Cmd → State × List Effect
   | .openPost k => openPost s k
   | .showNew => ({ s with gen := s.gen + 1, fresh := 0 }, [])
   | .act kind k => (actPress s kind k, [])
+  | .openNotes => openNotes s
+  | .openHome => ({ s with tab := .home }, [])
+  | .noteRefresh => startNoteRefresh s
+  | .noteMore => startNoteMore s
+  | .noteAppear k => noteAppear s k
   | .msg m => receive0 s m
 
 /-- The acts' outbox emptied: each step starts with nothing to send. -/
