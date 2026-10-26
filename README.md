@@ -41,6 +41,17 @@ when the answer is lost, rolled back in words when refused). Nothing is marked s
 been on screen, and what Sky sends never goes back. The unread count is polled every minute,
 after a refresh, at sign-in and once the server has the new seen time, at most one poll at a time.
 
+On screen (cairn#255), Home and Notifications are a segmented control in the header, the
+Notifications segment carrying the unread count; the Dock badge is that same count, and a rise is
+announced ("N unread notifications"). Go ▸ Home (⌘1) and Go ▸ Notifications (⌘2) sit next to
+View. Each list keeps its offset while the other shows (both keep one ref, kept by the
+runtime's `keepScroll`); pressing the shown tab again goes to its top. A row shows up to five
+avatars, its words and the post it is about (`getPosts`, 25 URIs a call); replies, mentions and
+quotes show as posts with Like, Repost and ⋯ (Follow, Mute, Copy Link, Open on bsky.app); a
+follow by one account has Follow back; unread rows are tinted and dotted until seen; a row opens
+its subject on bsky.app. Opening the tab refreshes the list, keeping its place and offering
+"N new"; ⌘R refreshes the list shown.
+
 ## The model (`lean/Sky`)
 
 - `Feed`: cairn_atproto's paged list of timeline items (`Paged FeedItem`): the items shown
@@ -137,6 +148,20 @@ after a refresh, at sign-in and once the server has the new seen time, at most o
 | ^69 | invariant | no row is from a muted account |
 | ^70 | invariant | `seenAt` never decreases and never passes a notification that hasn't been on screen |
 | ^71 | invariant | at most one unread poll, none signed out; the badge is the unread count shown |
+| ^72 | place | the Go menu, next to View |
+| ^73 | move | Go ▸ Home (⌘1), checked when it shows |
+| ^74 | move | Go ▸ Notifications (⌘2), checked when it shows |
+| ^75 | move | "N new notifications": the list goes to its top |
+| ^76 | move | Like a reply's, mention's or quote's post from its row |
+| ^77 | move | Repost it |
+| ^78 | place | a notification's ⋯ menu |
+| ^79 | move | Follow or Unfollow its author |
+| ^80 | move | Mute or Unmute its author: their notifications are gone |
+| ^81 | move | Copy Link to Post |
+| ^82 | move | Open on bsky.app |
+| ^83 | move | Follow back, on a follow by one account |
+| ^84 | invariant | Home or Notifications shows; each list's offset is unchanged by showing the other |
+| ^85 | invariant | the tab's count and the Dock badge are #253's shown unread count |
 
 ## Checking
 
@@ -151,16 +176,21 @@ is checked against what the server holds. The selftest
 127.0.0.1 and drives the app through Cairn's engine: a wrong password, a rate limit, offline and
 a slow sign-in, each in words; then signs in by typing, waits for images, scrolls with the wheel,
 loads more by scrolling to the end, refreshes with posts arriving (the first post in view stays
-put and "3 new posts" is offered, then taken back to the top), opens the notifications, then,
+put and "3 new posts" is offered, then taken back to the top), then,
 with the fake's replies slowed, likes, unlikes, reposts and follows (from ⋯), has a like refused
 and rolled back with its line, has a like's reply lost and settled by a read, mutes an author
-mid-feed (their posts gone, the post being read still) and undoes it; quits and resumes, and
+mid-feed (their posts gone, the post being read still) and undoes it; has others act while it is
+on Home (the tab's count and the Dock badge rise, said aloud), opens Go ▸ Notifications (marked
+seen, the count and badge to 0), follows back, likes a reply's post from its row, mutes its author
+from ⋯ (their rows gone) and goes back to Home at the same row; quits and resumes, and
 signs out from the app menu. It runs with a home of its own (`build/home`), refuses every host but 127.0.0.1,
 keeps its Keychain items under a throwaway service it deletes, stops the server, and leaves
 offscreen renders of each screen in `build/shots`.
 
 `make act-media` renders liking and muting against the fake offscreen at 30 frames a second
 (`Sky --act-frames`) and makes `build/media/act-like.mov` and `act-mute.mov` with ffmpeg.
+`make notes-media` does the same for notifications arriving on Home and being read
+(`Sky --notes-frames`, `build/media/notes.mov`).
 
 `make bench` and `make bench-lean`: first page, refresh, flings through 1,000 posts, memory
 and size against the fake PDS, with the numbers in [bench/README.md](bench/README.md).
