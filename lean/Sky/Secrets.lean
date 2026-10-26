@@ -295,6 +295,13 @@ theorem onAnswer0_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAns
 
 theorem onAnswer_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAnswer s id a).2 :=
   onAnswer0_noSecret s id a
+theorem timers_noSecret {es : List Effect} (h : Timers es) : NoSecret es := by
+  intro e he; obtain ⟨n, ms, rfl⟩ := h e he; rfl
+
+theorem answerCall_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (answerCall s id a).2 := by
+  unfold answerCall; split
+  · exact timers_noSecret (noteAnswer_only s id a).2
+  · exact onAnswer_noSecret _ _ _
 
 theorem onEvent_noSecret (s : State) (e : Session.Event) : NoSecret (onEvent s e).2 := by
   cases e with
@@ -323,7 +330,7 @@ theorem foldl_noSecret : ∀ (outs : List Out) (acc : State × List Effect),
     | cancel rid =>
       refine noSecret_append h ?_
       intro e he; simp only [List.mem_singleton] at he; subst he; rfl
-    | answer id a => exact noSecret_append h (onAnswer_noSecret _ _ _)
+    | answer id a => exact noSecret_append h (answerCall_noSecret _ _ _)
     | event e => exact noSecret_append h (onEvent_noSecret _ _)
 
 theorem drive_noSecret (s : State) (i : Session.Input)
@@ -377,6 +384,33 @@ theorem secureField_noSecret (op : TextOp) (f : Text.SecureField) :
     intro e he; simp [Text.SecureField.apply] at he; subst he; rfl
   all_goals exact field_noSecret _ _
 
+/-- Signed out, a reply leaves the session signed out. -/
+theorem reply_phase (ss : Session.State) (rid : Nat) (r : Cairn.Reply) (h : ss.phase = .signedOut) :
+    (Session.step ss (.reply rid r)).1.phase = .signedOut := by
+  simp only [Session.step, h, onCallReply]
+  repeat' split
+  all_goals simp_all [forgetBoth]
+
+theorem flushNotes_dead {s : State} (h : live s.session = false) : flushNotes s = (s, []) := by
+  simp [flushNotes, h]
+
+theorem markSeenNow_dead {s : State} (h : live s.session = false) : markSeenNow s = (s, []) := by
+  simp [markSeenNow, h]
+
+theorem startNoteRefresh_dead {s : State} (h : live s.session = false) :
+    startNoteRefresh s = (s, []) := by
+  simp [startNoteRefresh, h]
+
+theorem startNoteMore_dead {s : State} (h : live s.session = false) :
+    startNoteMore s = (s, []) := by
+  simp [startNoteMore, h]
+
+theorem driveSession_reply_dead (s : State) (rid : Nat) (r : Cairn.Reply)
+    (h : s.session.phase = .signedOut) : live (driveSession s (.reply rid r)).1.session = false := by
+  simp only [driveSession, signedOut_noSignedIn _ _ h, Bool.false_eq_true, ↓reduceIte]
+  have := (drive_same s (.reply rid r)).2.2
+  simp only [live, this, reply_phase _ _ _ h]
+
 theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) :
     NoSecret (step0 s c).2 := by
   cases c with
@@ -409,6 +443,25 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
     · exact noSecret_nil
   | showNew => exact noSecret_nil
   | act kind k => exact noSecret_nil
+  | openNotes =>
+    simp only [step0, Sky.openNotes]
+    rw [startNoteRefresh_dead, markSeenNow_dead]
+    · exact noSecret_nil
+    all_goals exact live_signedOut h
+  | openHome => exact noSecret_nil
+  | noteRefresh =>
+    simp only [step0, startNoteRefresh_dead (live_signedOut h)]; exact noSecret_nil
+  | noteMore =>
+    simp only [step0, startNoteMore_dead (live_signedOut h)]; exact noSecret_nil
+  | noteAppear k =>
+    simp only [step0, Sky.noteAppear]
+    split
+    · exact noSecret_nil
+    split
+    · rw [markSeenNow_dead]
+      · exact noSecret_nil
+      · exact live_signedOut h
+    · exact noSecret_nil
   | msg m =>
     simp only [step0]
     cases m with
@@ -424,12 +477,27 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
           all_goals first | exact noSecret_nil | simp_all
         | _ => exact noSecret_nil
       · split
-        · exact driveSession_noSecret _ _ h
+        · rw [flushNotes_dead]
+          · exact noSecret_append (driveSession_noSecret _ _ h) noSecret_nil
+          · exact driveSession_reply_dead _ _ _ h
         · split <;> exact noSecret_nil
     | timer n =>
       simp only [receive0]
-      split <;> exact noSecret_nil
-    | sub sb e => cases e <;> first | exact noSecret_nil | exact evicted_noSecret _ _
+      split
+      · exact noSecret_nil
+      · split
+        · obtain ⟨n', p, e⟩ := (hearSeen_only s .retry).1
+          rw [e, flushNotes_dead]
+          · exact noSecret_append (timers_noSecret (hearSeen_only s .retry).2) noSecret_nil
+          · exact live_signedOut h
+        · exact noSecret_nil
+    | sub sb e =>
+      cases e
+      case tick =>
+        simp only [receive0]; rw [flushNotes_dead]
+        · exact noSecret_nil
+        · exact live_signedOut h
+      all_goals first | exact noSecret_nil | exact evicted_noSecret _ _
     | _ => exact noSecret_nil
 
 /-- While signed out, no step sends a request carrying a Keychain secret. -/

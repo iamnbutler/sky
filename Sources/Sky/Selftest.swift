@@ -58,6 +58,18 @@ final class FakePDS {
         _ = done.wait(timeout: .now() + 5)
     }
 
+    /// `GET /control/state`: the server's state, as JSON.
+    func state() -> [String: Any] {
+        var out: [String: Any] = [:]
+        let done = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: URL(string: service + "/control/state")!) { d, _, _ in
+            if let d, let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { out = o }
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 5)
+        return out
+    }
+
     /// Stops the server (this process's child, by its pid).
     func stop() {
         guard process.isRunning else { return }
@@ -220,6 +232,12 @@ final class Selftest {
     /// A load-more or refresh in flight.
     func busy(_ f: Frame) -> Bool { texts(f).contains { $0.contains(" · loading more") || $0.contains(" · refreshing") } }
 
+    /// The count on the Notifications tab: "Notifications · 4", nil without one (0).
+    func unreadOf(_ f: Frame) -> Int? {
+        guard let l = node(61, f)?.label else { return nil }
+        return l == "Notifications" ? 0 : Int(l.dropFirst("Notifications · ".count))
+    }
+
     func posts(_ f: Frame) -> Int? {
         for t in texts(f) {
             let digits = t.prefix { $0.isNumber }
@@ -336,6 +354,25 @@ final class Selftest {
         until(10, "no image drawn at the top") { self.images($0) > 0 }
         shot("feed-top")
 
+        // Notifications: others like, repost and follow; a Refresh polls the unread count onto
+        // the tab; opening it groups the likes, and the count goes once the rows are on screen.
+        for a in 1...4 { f.control("act?kind=like&actor=\(a)") }
+        f.control("act?kind=repost&actor=5")
+        f.control("act?kind=follow&actor=2")
+        f.control("catchup")
+        click(4)
+        fr = until(10, "no unread count on the Notifications tab") { (self.node(61, $0)?.label ?? "").hasPrefix("Notifications · ") }
+        let unread = unreadOf(fr) ?? 0
+        guard unread >= 6 else { fail("\(unread) unread after 6 acts") }
+        shot("feed-unread")
+        click(61)
+        until(10, "no notification rows") { f in f.ax.contains { $0.control?.claim == 66 } }
+        until(10, "the seen time never reached the server") { _ in f.state()["seenAt"] != nil }
+        shot("notifications")
+        // Others keep posting and acting between requests, so a few may be new since.
+        click(62)
+        until(10, "the unread count didn't drop once the notifications were seen") { (self.unreadOf($0) ?? 0) < unread && self.node(61, $0) != nil }
+
         // Quit and launch again: the session resumes from the Keychain, nothing typed.
         engine?.stop()
         launch(f.service)
@@ -358,7 +395,7 @@ final class Selftest {
 
         clean()
         print("selftest: PASS (Sky against the fake PDS: wrong password, rate limit, offline and slow sign-ins in words; "
-              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; resumed; "
+              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; notifications grouped and marked seen once shown; resumed; "
               + "Sign out forgot \(items) Keychain items and the account)")
     }
 }

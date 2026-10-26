@@ -38,7 +38,19 @@
 41	invariant	active	b726421e8e92e831	Likes, reposts, follows and mutes settle on the server's
 42	invariant	active	c5d8f7d72671fd0e	A muted account's posts appear nowhere
 43	invariant	active	615c935da1bb928e	Signed out, no acts held
-44	invariant	active	29011d263df29d36	The password reaches one request
-45	invariant	active	e309ece8b5b093b0	Signed out, no secret
-46	invariant	active	7ece59d42494545b	Posts keep their keys
-47	invariant	active	6899da2d1d01210f	Image loads only near the view
+44	invariant	active	c892e9476316e66b	The password reaches one request
+45	invariant	active	60b67d7434f76b68	Signed out, no secret
+46	invariant	active	46ab1186ce383a06	Posts keep their keys
+47	invariant	active	fc7d7c937c1d5711	Image loads only near the view
+60	place	active	-	The notifications
+61	move	active	9f8e730f344d0e36	Notifications
+62	move	active	968ccbeceddb08cc	Home
+63	move	active	175bc9abb43b19f3	Refresh the notifications
+64	move	active	0ce8ae2470463568	Reach the end of the notifications
+65	move	active	4b02366d870ef2b0	Retry loading more notifications
+66	move	active	906fdeda6e1239a6	A notification
+67	invariant	active	9ed72eaef6800e48	The notifications are a run of the server's
+68	invariant	active	bb9fd2ea5cc8bc53	The groups partition the notifications
+69	invariant	active	c33ed4fa9bddcfb7	No row from a muted account
+70	invariant	active	46674ea871cd6598	Seen only once on screen
+71	invariant	active	de355b19f8f8f315	At most one unread poll

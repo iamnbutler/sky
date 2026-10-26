@@ -44,12 +44,16 @@ def cancels (s : State) (c : Cmd) : List Nat :=
 def bootId : Nat := ownId 0
 def accountId : Nat := ownId 1
 
+/-- The unread count's 200. -/
+def unreadReply (n : Nat) : Reply := json 200 (unreadCountJson n)
+
 /- Launched with a service default and a saved account: the handle filled in, resume
 (refreshSession, request 0), signed in, the account saved (request 5), the head (request 2, 30
-posts of 100). -/
+posts of 100) and the unread count (request 4). -/
 def resumed : State :=
   run initial [reply bootId (.bytes service.toUTF8), reply accountId (.bytes (accountJson service cfg.identifier)),
-               reply 0 sessionReply, reply 2 (pageReply (page 100 30 none)), reply 5 .done]
+               reply 0 sessionReply, reply 2 (pageReply (page 100 30 none)), reply 5 .done,
+               reply 4 (unreadReply 3)]
 
 #guard initial.waiting == [bootId]
 #guard (requests initial (reply bootId (.bytes service.toUTF8))).isEmpty
@@ -62,6 +66,7 @@ def resumed : State :=
 #guard idxs resumed == (List.range 30).map (99 - ·)
 #guard resumed.feed.cursor == cur 70 && !resumed.feed.atEnd
 #guard resumed.waiting == []
+#guard resumed.notes.unread == 3 && resumed.notes.badge == some "3" && resumed.notes.poll.isNone
 
 /- No saved account: signed out, nothing sent, the service from the default. -/
 def fresh : State := run initial [reply bootId (.bytes service.toUTF8), reply accountId (.failed .notFound "")]
@@ -78,47 +83,47 @@ def fresh : State := run initial [reply bootId (.bytes service.toUTF8), reply ac
 
 /- Load more: from the cursor; appended. -/
 def more : State := run resumed [.loadMore]
-#guard (requests resumed .loadMore).any fun (id, u) => id == 4 && contains u "cursor="
-#guard run more [reply 4 (pageReply (page 100 30 (some 70)))] |> fun s =>
+#guard (requests resumed .loadMore).any fun (id, u) => id == 6 && contains u "cursor="
+#guard run more [reply 6 (pageReply (page 100 30 (some 70)))] |> fun s =>
   idxs s == (List.range 60).map (99 - ·) && s.feed.cursor == cur 40 && s.feed.loadMore.isNone
 
 /- The end: no cursor, `atEnd`. -/
-#guard run more [reply 4 (pageReply (page 100 80 (some 70)))] |> fun s =>
+#guard run more [reply 6 (pageReply (page 100 80 (some 70)))] |> fun s =>
   idxs s == (List.range 100).map (99 - ·) && s.feed.cursor.isNone && s.feed.atEnd && !canLoadMore s
 
-/- Refresh with load-more in flight: the load-more is cancelled (request 4); the late page
+/- Refresh with load-more in flight: the load-more is cancelled (request 6); the late page
 changes nothing. -/
-#guard cancels more .refresh == [4]
+#guard cancels more .refresh == [6]
 def refreshing : State := run more [.refresh]
-#guard refreshing.feed.loadMore.isNone && refreshing.feed.refresh == some 2
-#guard (run refreshing [reply 4 (pageReply (page 100 30 (some 70)))]).feed == refreshing.feed
+#guard refreshing.feed.loadMore.isNone && refreshing.feed.refresh == some 3
+#guard (run refreshing [reply 6 (pageReply (page 100 30 (some 70)))]).feed == refreshing.feed
 
 /- Refresh: five new posts on top. -/
-#guard run refreshing [reply 6 (pageReply (page 105 30 none))] |> fun s =>
+#guard run refreshing [reply 8 (pageReply (page 105 30 none))] |> fun s =>
   idxs s == (List.range 35).map (104 - ·) && s.feed.cursor == cur 70
 
 /- Refresh: more than a page arrived, so the feed is replaced. -/
-#guard run refreshing [reply 6 (pageReply (page 200 30 none))] |> fun s =>
+#guard run refreshing [reply 8 (pageReply (page 200 30 none))] |> fun s =>
   idxs s == (List.range 30).map (199 - ·) && s.feed.cursor == cur 170
 
 /- A refresh racing a load-more: either order, the same feed. -/
 def racing : State := run resumed [.refresh, .loadMore]
-#guard racing.feed.refresh == some 1 && racing.feed.loadMore == some (2, (cur 70).getD "")
-#guard (run racing [reply 4 (pageReply (page 103 30 none)), reply 6 (pageReply (page 103 30 (some 70)))]).feed ==
-       (run racing [reply 6 (pageReply (page 103 30 (some 70))), reply 4 (pageReply (page 103 30 none))]).feed
+#guard racing.feed.refresh == some 2 && racing.feed.loadMore == some (3, (cur 70).getD "")
+#guard (run racing [reply 6 (pageReply (page 103 30 none)), reply 8 (pageReply (page 103 30 (some 70)))]).feed ==
+       (run racing [reply 8 (pageReply (page 103 30 (some 70))), reply 6 (pageReply (page 103 30 none))]).feed
 
-/- An expired token: the call is held, the session refreshed (request 6), the call sent again
-(request 8). -/
-#guard (requests more (reply 4 (err 400 "ExpiredToken" "expired"))).map (·.1) == [6]
-#guard let s := run more [reply 4 (err 400 "ExpiredToken" "expired")]
-  (requests s (reply 6 sessionReply)).map (·.1) == [8]
+/- An expired token: the call is held, the session refreshed (request 8), the call sent again
+(request 10). -/
+#guard (requests more (reply 6 (err 400 "ExpiredToken" "expired"))).map (·.1) == [8]
+#guard let s := run more [reply 6 (err 400 "ExpiredToken" "expired")]
+  (requests s (reply 8 sessionReply)).map (·.1) == [10]
 
 /- A refused refresh: signed out, the feed emptied, nothing in flight. -/
-#guard let s := run more [reply 4 (err 400 "ExpiredToken" "expired"), reply 6 (err 400 "ExpiredToken" "revoked")]
+#guard let s := run more [reply 6 (err 400 "ExpiredToken" "expired"), reply 8 (err 400 "ExpiredToken" "revoked")]
   !live s.session && s.feed == {} && s.session.held == [] && s.session.inflight == []
 
 /- Sign out with a load-more in flight: cancelled, both items forgotten, the account deleted. -/
-#guard cancels more .signOut == [4]
+#guard cancels more .signOut == [6]
 #guard (more.step .signOut).2.any fun | .request _ (.forgetSecret i) => i == accessItem | _ => false
 #guard (more.step .signOut).2.any fun | .request _ (.forgetSecret i) => i == refreshItem | _ => false
 #guard (more.step .signOut).2.any fun | .request _ (.deleteFile p) => p == accountPath | _ => false
@@ -215,5 +220,68 @@ def muting : State := run resumed [.act .mute k1]
 
 /- Signed out: nothing held. -/
 #guard (run liking [.signOut]).acts.isEmpty
+/-! ## Notifications -/
+
+def t0 : Nat := 1790812800000
+def who (h : String) : Profile := { did := "did:plc:" ++ h, handle := h ++ ".test" }
+def postP : String := "at://" ++ cfg.did ++ "/app.bsky.feed.post/p"
+def notice (i : Nat) (h : String) (r : NotificationReason) (subj : Option String := none) : Notification :=
+  { uri := s!"at://did:plc:{h}/x/{i}", cid := "c", author := who h, reason := r, reasonSubject := subj,
+    indexedAt := formatDatetime (t0 + i * 1000) }
+
+/-- Newest first: Bob and Alice liked the post, Carol followed, Dan replied. -/
+def notesPage (cursor : Option String := none) (seenAt : Option Nat := none) : Reply :=
+  json 200 ({ notifications := [notice 4 "bob" .like postP, notice 3 "alice" .like postP,
+                                 notice 2 "carol" .follow, notice 1 "dan" .reply postP],
+              cursor, seenAt := seenAt.map formatDatetime } : NotificationPage).toJson
+
+def notesOpen : State := run resumed [.openNotes]
+
+/- Notifications: the head (request 6, 30 a page); grouped, likes of one post in one row. -/
+#guard (requests resumed .openNotes).any fun (id, u) => id == 6 && contains u "listNotifications?limit=30"
+#guard notesOpen.tab == .notifications
+def loaded : State := run notesOpen [reply 6 notesPage]
+#guard loaded.noteGroups.map (·.words) ==
+  ["@bob.test and @alice.test liked your post", "@carol.test followed you", "@dan.test replied to you"]
+#guard loaded.notes.list.items.length == 4
+/- A muted account's notifications are left out of the rows (the mute table, ^40). -/
+#guard (State.noteGroups { loaded with acts := loaded.acts.toggleMute "did:plc:dan" }).map Group.words ==
+  ["@bob.test and @alice.test liked your post", "@carol.test followed you"]
+/- After the head, the unread count is polled (request 8); at most one: the minute's tick sends
+none while it is in flight. -/
+#guard (requests notesOpen (reply 6 notesPage)).map (·.2) |>.any (contains · "getUnreadCount")
+#guard loaded.notes.poll.isSome
+#guard !((requests loaded (.msg (.sub (.every 60000) .tick))).any fun (_, u) => contains u "getUnreadCount")
+/- The badge: the poll's count, then less what is marked seen. -/
+def polled : State := run loaded [reply 8 (unreadReply 4)]
+#guard polled.notes.badge == some "4" && polled.notes.poll.isNone
+/- Seen only once on screen: nothing is marked until a row appears; the newest row appearing
+marks the list seen up to it at once (the badge goes) and sends updateSeen (request 10). -/
+#guard polled.notes.seen.shown == 0 && polled.notes.seen.1.mark == 0
+def keyOf (s : State) (i : Nat) : Nat := (s.noteGroups[i]?.map (·.key)).getD 0
+#guard (requests polled (.noteAppear (keyOf polled 0))).any fun (id, u) => id == 10 && contains u "updateSeen"
+def marked : State := run polled [.noteAppear (keyOf polled 0)]
+#guard marked.notes.seen.shown == t0 + 4000 && marked.notes.seen.1.mark == t0 + 4000
+#guard marked.notes.badge == none
+/- An older row appearing raises nothing and sends nothing. -/
+#guard (requests marked (.noteAppear (keyOf marked 2))).isEmpty
+#guard (run marked [.noteAppear (keyOf marked 2)]).notes.seen.1.mark == t0 + 4000
+/- A row appearing from a frame before Home (late) marks nothing. -/
+#guard (run polled [.openHome, .noteAppear (keyOf polled 0)]).notes.seen.1.mark == 0
+/- Acknowledged: what the server holds. Refused: rolled back, in words. -/
+#guard (run marked [reply 10 (json 200 (.obj []))]).notes.seen.1.entry.server == t0 + 4000
+/- Acknowledged, the count is polled again: the server's own, from the new seen time. A poll due
+while one is in flight goes once that one answers. -/
+#guard (requests marked (reply 10 (json 200 (.obj [])))).any fun (_, u) => contains u "getUnreadCount"
+#guard (run marked [reply 10 (json 200 (.obj [])), reply 12 (unreadReply 1)]).notes.badge == some "1"
+#guard (run loaded [.msg (.sub (.every 60000) .tick)]).notes.pollDue &&
+  (requests loaded (reply 8 (unreadReply 4)) |>.any fun (_, u) => contains u "getUnreadCount") == false &&
+  ((requests (run loaded [.msg (.sub (.every 60000) .tick)]) (reply 8 (unreadReply 4))).any fun (_, u) => contains u "getUnreadCount")
+#guard (run marked [reply 10 (err 400 "InvalidRequest" "no")]) |> fun s =>
+  s.notes.seen.shown == 0 && (s.problem.map (contains · "Couldn't mark notifications read")).getD false
+/- Lost (a timeout): read back with the first page, whose seenAt says it was applied. -/
+#guard (requests marked (reply 10 (.failed .timeout "timed out"))).any fun (_, u) => contains u "listNotifications?limit=1"
+/- Signed out: no notifications, no poll, Home. -/
+#guard (run polled [.signOut]) |> fun s => s.notes.list == {} && s.notes.poll.isNone && s.tab == .home
 
 end Sky.Tests

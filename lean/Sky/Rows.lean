@@ -35,13 +35,19 @@ theorem onAnswer0_rows (s : State) (id : Nat) (a : Answer) : (onAnswer0 s id a).
 
 theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows :=
   onAnswer0_rows s id a
+theorem NotesOnly.rows {s t : State} (h : NotesOnly s t) : t.rows = s.rows := by
+  obtain ⟨n, p, rfl⟩ := h; rfl
 
 theorem sendOwn_rows (s : State) (k : Own) (r : Request) : (sendOwn s k r).1.rows = s.rows := rfl
 
 theorem handleOut_rows (acc : State × List Effect) (o : Out) :
     (handleOut acc o).1.rows = acc.1.rows := by
   cases o with
-  | answer id a => exact onAnswer_rows _ _ _
+  | answer id a =>
+    show (answerCall acc.1 id a).1.rows = acc.1.rows
+    unfold answerCall; split
+    · exact NotesOnly.rows (noteAnswer_only _ _ _).1
+    · exact onAnswer_rows _ _ _
   | event e => cases e <;> first | rfl | (rename_i x; cases x <;> rfl)
   | _ => rfl
 
@@ -72,6 +78,69 @@ theorem driveSession_rows (s : State) (i : Session.Input) : (driveSession s i).1
   · exact (startRefresh_rows _).trans (drive_rows _ _)
   · exact drive_rows _ _
 
+theorem noteCall_rows (s : State) (f : Nat → Notes → Notes) (c : Call) :
+    (Sky.noteCall s f c).1.rows = s.rows := drive_rows _ _
+
+theorem sendSeen_rows (acc : State × List Effect) (a : Cairn.Optimistic.Act Nat) :
+    (sendSeen acc a).1.rows = acc.1.rows := by
+  cases a with
+  | write k v => dsimp only [sendSeen]; exact noteCall_rows _ _ _
+  | read k => dsimp only [sendSeen]; exact noteCall_rows _ _ _
+  | _ => rfl
+
+theorem foldl_sendSeen_rows : ∀ (as : List (Cairn.Optimistic.Act Nat)) (acc : State × List Effect),
+    (as.foldl sendSeen acc).1.rows = acc.1.rows
+  | [], _ => rfl
+  | a :: as, acc => (foldl_sendSeen_rows as _).trans (sendSeen_rows acc a)
+
+theorem startPoll_rows (s : State) : (startPoll s).1.rows = s.rows := by
+  unfold startPoll; split
+  · exact noteCall_rows _ _ _
+  · rfl
+
+theorem flushNotes_rows (s : State) : (flushNotes s).1.rows = s.rows := by
+  unfold flushNotes; split
+  · have h1 := foldl_sendSeen_rows s.notes.todo ({ s with notes := { s.notes with todo := [] } }, [])
+    dsimp only; split
+    · exact (startPoll_rows _).trans h1
+    · exact h1
+  · rfl
+
+theorem hearSeen_rows (s : State) (e : SeenEv) : (hearSeen s e).1.rows = s.rows :=
+  NotesOnly.rows (hearSeen_only s e).1
+
+theorem startNoteRefresh_rows (s : State) : (startNoteRefresh s).1.rows = s.rows := by
+  unfold startNoteRefresh; split
+  · split
+    · exact noteCall_rows _ _ _
+    · rfl
+  · rfl
+
+theorem startNoteMore_rows (s : State) : (startNoteMore s).1.rows = s.rows := by
+  unfold startNoteMore; split
+  · split
+    · exact noteCall_rows _ _ _
+    · rfl
+  · rfl
+
+theorem markSeenNow_rows (s : State) : (markSeenNow s).1.rows = s.rows := by
+  unfold markSeenNow; split
+  · have := (foldl_seenAct s.notes.seen.markSeen.2
+      ({ s with notes := { s.notes with seen := s.notes.seen.markSeen.1 } }, []) timers_nil).1
+    exact (flushNotes_rows _).trans (NotesOnly.rows this)
+  · rfl
+
+theorem noteAppear_rows (s : State) (k : Nat) : (noteAppear s k).1.rows = s.rows := by
+  unfold noteAppear; split
+  · rfl
+  · split
+    · exact markSeenNow_rows _
+    · rfl
+
+theorem openNotes_rows (s : State) : (openNotes s).1.rows = s.rows := by
+  unfold openNotes
+  exact (markSeenNow_rows _).trans (startNoteRefresh_rows _)
+
 theorem loadSources_rows (s : State) (srcs : List String) : (loadSources s srcs).1.rows = s.rows :=
   (loadSources_core s srcs).2.2.2.2
 
@@ -86,6 +155,10 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
   | refresh => exact startRefresh_rows s
   | signOut => exact driveSession_rows _ _
   | appearRow k => exact (appearRow_core s k).2.2.2.2
+  | openNotes => exact openNotes_rows s
+  | noteRefresh => exact startNoteRefresh_rows s
+  | noteMore => exact startNoteMore_rows s
+  | noteAppear k => exact noteAppear_rows s k
   | openPost k =>
     simp only [step0, Sky.openPost]
     split <;> rfl
@@ -116,10 +189,19 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
           · rfl
         | _ => rfl
       · split
-        · exact driveSession_rows _ _
+        · exact (flushNotes_rows _).trans (driveSession_rows _ _)
         · split <;> rfl
-    | timer n => simp only [receive0]; split <;> rfl
-    | sub sb e => cases e <;> rfl
+    | timer n =>
+      simp only [receive0]
+      split
+      · rfl
+      · split
+        · exact (flushNotes_rows _).trans (hearSeen_rows _ _)
+        · rfl
+    | sub sb e =>
+      cases e
+      case tick => exact flushNotes_rows _
+      all_goals rfl
     | _ => rfl
   | _ => rfl
 

@@ -26,6 +26,15 @@ says why in the status line; a lost answer is read back from the account's own r
 is believed. A muted account's posts, and its reposts, show as "Post from an account you muted"
 with Unmute; a post quoting it says "Quoted post from an account you muted".
 
+Notifications (cairn#253) show in their own virtual list, one press from the header, whose
+button carries the unread count. Likes, reposts and follows of the same post (or of you) next to
+each other are one row ("Alice, Bob and 3 others liked your post"); mentions, replies and quotes
+are a row each; a muted account's notifications are left out. A row coming into view marks the list seen up to its newest notification: at
+once on screen, and with `updateSeen` in the background (Cairn's optimistic entry: read back
+when the answer is lost, rolled back in words when refused). Nothing is marked seen that hasn't
+been on screen, and what Sky sends never goes back. The unread count is polled every minute,
+after a refresh, at sign-in and once the server has the new seen time, at most one poll at a time.
+
 ## The model (`lean/Sky`)
 
 - `Feed`: cairn_atproto's paged list of timeline items (`Paged FeedItem`): the items shown
@@ -47,6 +56,11 @@ with Unmute; a post quoting it says "Quoted post from an account you muted".
 - `Proofs`, `SessionFacts`: what every step keeps, and the moves' posts. `Secrets`: the app
   password reaches exactly one request, redacted, and is cleared as it is sent; signed out, no
   request carries a Keychain secret; Sign out forgets both items.
+- `Notifications`: the groups (`groupAll`, proved a partition, in order, of runs of one reason
+  and subject, maximal), the seen marker (`Seen`: the mark, a one-key `Cairn.Optimistic` entry,
+  the last value sent; `SeenOk` kept by construction) and the notes (the paged list, the poll,
+  the unread count and the badge). `NoteProofs`: the notes' handlers, the moves' posts, only a
+  row on screen raising the mark, and signed out, no notes and no poll.
 - `Rows`: the list's keys (posts put on top get the keys below the first, so nothing below
   moves), and the image loads near the view.
 - `View`: the sign-in screen, the account panel and the feed's virtual list.
@@ -93,6 +107,18 @@ with Unmute; a post quoting it says "Quoted post from an account you muted".
 | ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
 | ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
 | ^47 | invariant | image loads only for rows near the view; none signed out |
+| ^60 | place | the notifications: a virtual list of grouped rows and the end row |
+| ^61 | move | Notifications (with the unread count): show the notifications |
+| ^62 | move | Home: back to the feed |
+| ^63 | move | Refresh the notifications |
+| ^64 | move | the end of the notifications comes into view: load more |
+| ^65 | move | Retry, after loading more notifications failed |
+| ^66 | move | a row of the notifications comes into view: marked seen up to it |
+| ^67 | invariant | the notifications are a contiguous, newest-first run of the server's |
+| ^68 | invariant | the groups partition the notifications shown, in order; each one reason and subject |
+| ^69 | invariant | no row is from a muted account |
+| ^70 | invariant | `seenAt` never decreases and never passes a notification that hasn't been on screen |
+| ^71 | invariant | at most one unread poll, none signed out; the badge is the unread count shown |
 
 ## Checking
 

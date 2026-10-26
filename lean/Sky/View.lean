@@ -1,6 +1,6 @@
 module
 
-public import Sky.Rows
+public import Sky.NoteProofs
 public import Cairn.VList
 
 /-! # The window
@@ -390,18 +390,94 @@ def statusRow (s : State) (ui : UI) : Node :=
          | none, some l => .text { font := { size := 12 }, color := alert } l
          | none, none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ])
 
-/-- Signed in: the header (who, Refresh, Account), the account panel, the status line and the
-feed's virtual list. -/
+/-! ## The notifications -/
+
+/-- The notifications' list. -/
+def notesList (s : State) : VList :=
+  { ref := ⟨60, s.notes.gen⟩,
+    style := { width := .fill, height := .fill, background := some white, radius := 8, clip := true } }
+
+/-- A row: who did what, when; a dot while it is newer than what is marked seen (only the dot:
+a seen row keeps its height, so marking never moves the rows). Coming into
+view, it marks the list seen up to it (^66). -/
+def noteRow (s : State) (ui : UI) (g : Group) : Node :=
+  let r : ControlRef := ⟨66, g.key⟩
+  let newest := newestMs g.members
+  let unseen := s.notes.seen.shown < newest
+  .box { width := .fill, background := some white, border := ring ui r }
+    (some { ref := r, role := .listItem, appear := true, label := g.words })
+    [ .box { axis := .row, width := .fill, padding := ⟨10, 14, 10, 14⟩, gap := 10, align := .center } none
+        [ .box { width := .fixed 8, height := .fixed 8, radius := 4,
+                 background := some (if unseen then accent else white) } none [],
+          .box { width := .fill, gap := 3 } none
+            [ .para { font := { size := 13, weight := 500 }, color := ink } {} g.words,
+              textLine (match g.members.head? with
+                        | some n => relTime s.now n.indexedAt
+                        | none => "") muted 12 ] ],
+      .box { width := .fill, height := .fixed 1, background := some line } none [] ]
+
+/-- The end of the notifications: loading more as it comes into view (^64), Retry after a
+failure (^65), or the end. -/
+def noteEndRow (s : State) (ui : UI) : Node :=
+  let base : Style := { width := .fill, height := .fixed endH, align := .center, justify := .center,
+                        gap := 10, axis := .row }
+  if canNoteMore s && !s.notes.moreFailed then
+    .box base (some { ref := ⟨64, 0⟩, role := .text, label := "Loading more notifications", appear := true })
+      [.text { font := { size := 13 }, color := muted } "Loading…"]
+  else if canNoteMore s && s.notes.moreFailed then
+    .box base none
+      [.text { font := { size := 13 }, color := alert } "Couldn't load more.",
+       button ui 65 "Retry" 80]
+  else
+    .box base none
+      [.text { font := { size := 13 }, color := muted }
+        (if s.notes.list.loadMore.isSome || (s.notes.list.items.isEmpty && s.notes.list.refresh.isSome) then "Loading…"
+         else if s.notes.list.items.isEmpty then "No notifications yet."
+         else "That's all.")]
+
+def noteRowOf (s : State) (ui : UI) (k : Nat) : Node :=
+  if k = 0 then noteEndRow s ui
+  else match s.noteGroups.find? (·.key == k) with
+    | some g => noteRow s ui g
+    | none => .box { width := .fill, height := .fixed 1 } none []
+
+/-- The rows' keys: one per group, then the end row's `0`. -/
+def noteKeys (s : State) : Array Nat := (s.noteGroups.map Group.key ++ [0]).toArray
+
+/-- The unread count, on the Notifications button. -/
+def notesLabel (s : State) : String :=
+  match s.notes.badge with
+  | some n => "Notifications · " ++ n
+  | none => "Notifications"
+
+def notesLine (s : State) : String :=
+  match s.problem with
+  | some p => p
+  | none => plural s.notes.list.items.length "notification" "notifications" ++
+      (if s.notes.list.refresh.isSome then " · refreshing" else "") ++
+      (if s.notes.list.loadMore.isSome then " · loading more" else "")
+
+/-- Signed in: the header (what shows, who, Refresh, the other tab, Account), the account panel,
+the status line and the list: the feed's, or the notifications'. -/
 def feedView (s : State) (ui : UI) : List Node :=
+  let home := s.tab == .home
   [ .box { axis := .row, width := .fill, height := .fixed 30, gap := 8, align := .center } none
-      [ .text { font := { size := 17, weight := 700 }, color := ink } "Following",
+      [ .text { font := { size := 17, weight := 700 }, color := ink } (if home then "Following" else "Notifications"),
         .box { width := .fill, height := .fixed lineH, clip := true } none
           [.text { font := { size := 12 }, color := muted } (who s)],
-        (if canRefresh s then button ui 4 "Refresh" 84 else greyButton "Refresh" 84),
+        (if home then (if canRefresh s then button ui 4 "Refresh" 84 else greyButton "Refresh" 84)
+         else (if canNoteRefresh s then button ui 63 "Refresh" 84 else greyButton "Refresh" 84)),
+        (if home then button ui 61 (notesLabel s) 150 else button ui 62 "Home" 84),
         button ui 13 (if s.accountOpen then "Done" else "Account") 84 ] ] ++
   accountPanel s ui ++
-  [ statusRow s ui,
-    VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
+  (if home then
+    [ statusRow s ui,
+      VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
+   else
+    [ .box { axis := .row, width := .fill, height := .fixed 24, align := .center } none
+        [ .box { width := .fill, height := .fixed lineH, clip := true } none
+            [.text { font := { size := 12 }, color := if s.problem.isSome then alert else muted } (notesLine s)] ],
+      VList.node (notesList s) ui (noteKeys s) (noteRowOf s ui) ])
 
 def view (s : State) (ui : UI) : Node :=
   .box { width := .fill, height := .fill, padding := ⟨pad, pad, pad, pad⟩, gap := 7,

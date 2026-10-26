@@ -5,27 +5,31 @@ import Cairn.Fuzz.Text
 /-! # Sky on `cairn fuzz`'s host
 
 `cairn fuzz` types in Sky's fields, presses its buttons (sign in, load more, refresh, sign out,
-the app-password link, like, repost, follow, mute) and plays the host: replies late, in any
-order, to cancelled and stray ids, failing (Cairn's docs/fuzz.md).
+the app-password link, like, repost, follow, mute, the notifications) and plays the host:
+replies late, in any order, to cancelled and stray ids, failing (Cairn's docs/fuzz.md).
 
 The server is cairn_atproto's whole fake PDS (`Fake.server`, cairn#260): every XRPC request
-reaches it, and it holds the tester's repo and mutes through the sequence. Requests fail before
-it acts or are lost after it (retransmit off), and between steps posts arrive, other accounts
-like, repost and follow, the AppView catches up and the access token expires. Half the
-sequences start from the seed the fuzz types (`cfg`), saved signed in half of those; the rest
-from a random seed, saved signed in (`worldGen`). The rest of the host (the saved service and
-account, files, images) is `replies`, from the seed's fake.
-
+reaches it, and it holds the tester's repo, mutes and seen time through the sequence. Requests
+fail before it acts or are lost after it (retransmit off), and between steps posts arrive, other
+accounts like, repost and follow (so notifications arrive), the AppView catches up and the
+access token expires. Half the sequences start from the seed the fuzz types (`cfg`), saved
+signed in half of those; the rest from a random seed, saved signed in (`worldGen`). Often other
+accounts have acted a few pages' worth first, so the notifications load more and group, and a
+load-more fails one time in four before it reaches the server, so Retry gets pressed. The rest
+of the host (the saved service and account, files, images) is `replies`, from the seed's fake.
 The fuzz types into the sign-in form (`edits`): mostly the fake's identifier, app password and
 service, sometimes a wrong password, the password appended to what is there (after the text
 the fuzzer plants in the secure field, which must never reach an effect unredacted), an empty
 service, or Cairn's random editing script.
 
-Every claim is checked after every step: ^24, ^25 and ^43 are decidable and checked as states;
-^24 against the runtime's ids (`outstanding`) and once everything is answered (`drained`), and
-Sky's wiring of the feed against the server's timeline (`feedOk`). ^41 against the server
-(`actsHeld`, `countsHeld`): every key Sky wrote and holds settled shows what the server holds,
-and a settled like count is the server's whenever no one else acted since the view. -/
+Every claim is checked after every step: ^24, ^25, ^43 and ^69 are decidable and checked as
+states; ^24 against the runtime's ids (`outstanding`) and once everything is answered
+(`drained`), and Sky's wiring of the feed against the server's timeline (`feedOk`). ^41 against
+the server (`actsHeld`, `countsHeld`): every key Sky wrote and holds settled shows what the
+server holds, and a settled like count is the server's whenever no one else acted since the
+view. The notifications against the server too: a contiguous run of its notifications (^67),
+and its `seenAt` never past the newest notification that has been on screen (^70); the groups
+(^68, ^69) and the poll (^71) as states. -/
 
 namespace Sky.FakeCheck
 
@@ -194,13 +198,55 @@ def worldGen : Gen World := do
 
 /-- Like, repost, follow and mute pressed often, so their writes race; Sign out only once a
 page is in, and seldom, like Cancel, since a world whose password can't be typed stays signed
-out after them. -/
+out after them. The notifications and both Retries often enough that their rows come into
+view, load more and refresh. -/
 def weights (s : State) (r : ControlRef) : Nat :=
   if r.claim == 37 || r.claim == 38 then 6
   else if r.claim == 39 || r.claim == 40 then 3
   else if r.claim == 11 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)
   else if r.claim == 12 || r.claim == 13 then 1
+  else if r.claim == 61 || r.claim == 65 || r.claim == 31 then 4
   else 2
+
+/-- ^67 against the server: the notifications are a contiguous run of the server's, newest
+first (the server keeps them oldest first, and only adds at the newest end). -/
+def notesRun (s : State) (w : World) : Bool :=
+  let mine := s.notes.list.items.map (·.uri)
+  let theirs := w.server.notices.reverse.map (·.uri)
+  mine.isEmpty || (List.range (theirs.length + 1)).any fun i => mine.isPrefixOf (theirs.drop i)
+
+/-- ^68 and ^69 as states: the rows, flattened, are the notifications held, in order; each row
+is of one reason and subject; no row is from a muted account. -/
+def groupsOk (s : State) : Bool :=
+  let gs := s.noteGroups
+  (gs.flatMap (·.members)).map (·.uri) == (s.notes.list.items.filter fun n => !s.muted n.author.did).map (·.uri) &&
+    gs.all (fun g => !g.members.isEmpty && g.members.all fun n => n.reason == g.reason && n.reasonSubject == g.subject) &&
+    gs.all (fun g => g.members.all fun n => !s.muted n.author.did)
+
+/-- ^70 against the server: the `seenAt` the server holds is at most the newest notification
+that has appeared on screen. -/
+def seenOk (s : State) (w : World) : Bool := (w.seenAt.getD 0) ≤ s.notes.seen.1.mark
+
+/-- ^71 as a state: at most one `getUnreadCount` the session holds (in flight or held for a
+token refresh); signed out, none, no notifications and Home. -/
+def pollOk (s : State) : Bool :=
+  let polls := (s.session.inflight.map (·.2) ++ s.session.held).filter (·.call == CairnAtproto.Session.Call.getUnreadCount)
+  polls.length ≤ 1 &&
+    (live s.session || (polls.isEmpty && s.notes.list == {} && s.notes.poll.isNone &&
+      s.notes.seenCalls.isEmpty && s.tab == .home))
+
+/-- The world a sequence starts with (`worldGen`), where other accounts have often acted
+already, more than a page's worth at times, so the notifications load more (^64, ^65) and group. -/
+def worldInit : Gen World := do
+  let w ← worldGen
+  let n ← Gen.elem [0, 5, 20, 60, 120]
+  let mut srv := w.server.grow 20
+  let mine := (List.range srv.length).filter (isMine srv.cfg)
+  for _ in List.range n do
+    let kind ← Gen.elem [ActKind.like, .like, .repost, .follow]
+    let post ← if mine.isEmpty then pure none else some <$> Gen.elem mine
+    srv := srv.control (.act kind (← Gen.below authorNames.length) post)
+  return { w with server := srv.control .catchup }
 
 end Sky.FakeCheck
 
@@ -228,7 +274,10 @@ def fuzz : Cairn.Fuzz.Custom State where
     [ (24, fun t => decide (Inv t.after)),
       (25, fun t => decide (SignedOutEmpty t.after)),
       (46, fun t => FakeCheck.rowsFollow t.after && FakeCheck.prependKeeps t),
-      (47, fun t => FakeCheck.imagesNear t.after) ]
+      (47, fun t => FakeCheck.imagesNear t.after),
+      (68, fun t => FakeCheck.groupsOk t.after),
+      (69, fun t => FakeCheck.groupsOk t.after),
+      (71, fun t => FakeCheck.pollOk t.after) ]
   subEvents := fun s sb => match sb with
     | .imageCache _ => some (FakeCheck.evict s)
     | _ => none
@@ -240,15 +289,24 @@ def fuzz : Cairn.Fuzz.Custom State where
   -- Cairn 0.5.0's presence check counts a list that left as hidden for good, so after a refresh
   -- (a new list ref) the controls in the new list's rows fail it (cairn#268, fixed for 0.5.1).
   -- Until that release, the row moves are exempt from presence; drop this with the bump.
-  noControl := [30, 31, 32, 37, 38, 39, 40]
+  noControl := [30, 31, 32, 37, 38, 39, 40, 64, 65, 66]
   weights := FakeCheck.weights
   server := some { CairnAtproto.Fake.server (S := State) {}
-      [(24, FakeCheck.feedOk), (41, FakeCheck.actsHeld), (41, FakeCheck.countsHeld)]
-      [(41, FakeCheck.actsHeld)] with
-    init := FakeCheck.worldGen }
+      [(24, FakeCheck.feedOk), (41, FakeCheck.actsHeld), (41, FakeCheck.countsHeld),
+       (67, FakeCheck.notesRun), (70, FakeCheck.seenOk)]
+      [(41, FakeCheck.actsHeld), (67, FakeCheck.notesRun), (70, FakeCheck.seenOk)] with
+    init := FakeCheck.worldInit
+    -- A load-more fails one time in four before it reaches the server, so Retry (^31, ^65)
+    -- gets pressed.
+    handle := fun w id r => match r with
+      | .http _ url .. => do
+        if (url.splitOn "cursor=").length > 1 && (← Gen.chance 1 4) then
+          return (w, .failed .network "The fuzz's host dropped the connection.")
+        CairnAtproto.Fake.serve w id r
+      | _ => CairnAtproto.Fake.serve w id r }
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
     s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty &&
-    s.images.pending.isEmpty)]
+    s.images.pending.isEmpty && s.notes.calls.isEmpty && s.notes.todo.isEmpty)]
 
 end Sky
