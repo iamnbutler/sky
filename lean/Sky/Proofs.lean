@@ -568,6 +568,34 @@ theorem appearRow_acts (s : State) (k : Nat) : (appearRow s k).1.acts = s.acts :
   · rfl
   · exact loadSources_acts _ _
 
+theorem actPress_core (s : State) (kind : Kind) (k : Nat) :
+    (actPress s kind k).session = s.session ∧ (actPress s kind k).feed = s.feed ∧
+      (actPress s kind k).nextCall = s.nextCall ∧ (actPress s kind k).password = s.password ∧
+      (actPress s kind k).rows = s.rows := by
+  unfold actPress
+  split
+  · split
+    · split <;> exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+    · exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  · exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- A press's step is the press, with at most the Undo it offers: the same session, feed, call
+ids, password, rows and acts. -/
+theorem actStep_core (s : State) (kind : Kind) (k : Nat) :
+    (actStep s kind k).1.session = s.session ∧ (actStep s kind k).1.feed = s.feed ∧
+      (actStep s kind k).1.nextCall = s.nextCall ∧ (actStep s kind k).1.password = s.password ∧
+      (actStep s kind k).1.rows = s.rows ∧ (actStep s kind k).1.acts = (actPress s kind k).acts := by
+  have c := actPress_core s kind k
+  unfold actStep
+  dsimp only
+  split
+  · split <;> exact ⟨c.1, c.2.1, c.2.2.1, c.2.2.2.1, c.2.2.2.2, rfl⟩
+  · exact ⟨c.1, c.2.1, c.2.2.1, c.2.2.2.1, c.2.2.2.2, rfl⟩
+
+theorem actStep_outbox (s : State) (kind : Kind) (k : Nat) :
+    (actStep s kind k).1.acts.outbox = (actPress s kind k).acts.outbox :=
+  congrArg Acts.outbox (actStep_core s kind k).2.2.2.2.2
+
 theorem appearRow_inv {s : State} (h : Inv s) (k : Nat) : Inv (appearRow s k).1 :=
   h.other (appearRow_core s k).1 (appearRow_core s k).2.1 (appearRow_core s k).2.2.1
 
@@ -665,7 +693,6 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   | editPassword op => exact h.other rfl rfl rfl
   | editService op => exact h.other rfl rfl rfl
   | nextField => exact h
-  | toggleAccount => exact h.other rfl rfl rfl
   | openHelp => exact sendOwn_inv h _ _
   | appearRow k => exact appearRow_inv h k
   | openPost k =>
@@ -674,13 +701,17 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
     · exact sendOwn_inv h _ _
     · exact h
   | showNew => exact h.other rfl rfl rfl
-  | act kind k =>
-    simp only [step0, actPress]
+  | act kind k => exact h.other (actStep_core s kind k).1 (actStep_core s kind k).2.1 (actStep_core s kind k).2.2.1
+  | undoMute =>
+    simp only [step0, undoMuteStep]
     split
     · split
-      · split <;> exact h.other rfl rfl rfl
+      · exact h.other rfl rfl rfl
       · exact h
     · exact h
+  | copyLink k =>
+    simp only [step0, Sky.copyLink]
+    split <;> exact h
   | openNotes => exact openNotes_inv h
   | openHome => exact h.other rfl rfl rfl
   | noteRefresh => exact startNoteRefresh_inv h
@@ -720,7 +751,7 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
       · exact h.other rfl rfl rfl
       · split
         · exact flushNotes_inv (hearSeen_inv h _)
-        · exact h.other rfl rfl rfl
+        · split <;> exact h.other rfl rfl rfl
     | clock t => exact h.other rfl rfl rfl
     | sub sb e =>
       cases e
@@ -730,7 +761,7 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
 theorem settle_fst (s : State) :
     (settle s).1 = if live s.session then s
       else { s with feed := {}, session := { s.session with inflight := [], held := [] },
-                    acts := {},
+                    acts := {}, undoMute := none,
                     notes := { did := s.notes.did, seen := s.notes.seen.reset, gen := s.notes.gen }, tab := .home } := by
   unfold settle; split <;> simp_all [cancel_all]
 
@@ -770,13 +801,12 @@ structure Core (s t : State) : Prop where
   password : t.password = s.password
   identifier : t.identifier = s.identifier
   service : t.service = s.service
-  accountOpen : t.accountOpen = s.accountOpen
   notes : t.notes = s.notes
   tab : t.tab = s.tab
 
 theorem tidy_core (s : State) : Core s (tidy s).1 := by
   obtain ⟨r, g, f, m, im, e⟩ := tidy_shape s
-  rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 theorem tidy_inv {s : State} (h : Inv s) : Inv (tidy s).1 :=
   h.other (tidy_core s).session (tidy_core s).feed (tidy_core s).nextCall
@@ -1226,7 +1256,7 @@ theorem signIn_post {s : State} (h : ready s = true) :
   have hc : canSignIn s.session = true := by simp only [ready, Bool.and_eq_true] at h; exact h.2
   let s0 := clearOut s
   let t : State := { s0 with password := Text.SecureField.empty passwordHint, host := serviceOf s,
-                              problem := none, accountOpen := false, slow := false }
+                              problem := none, slow := false }
   let i : Session.Input := .signIn (serviceOf s) (identifierOf s) s.password.text
   have h' : ready (clearOut s) = true := h
   have e0 : (step0 (clearOut s) .signIn).1 = (drive t i).1 := by
@@ -1250,9 +1280,9 @@ theorem signOut_phase (ss : Session.State) : (Session.step ss .signOut).1.phase 
 theorem signOut_post1 (s : State) :
     (step1 s .signOut).1.session.phase = .signedOut ∧ (step1 s .signOut).1.feed = {} := by
   have hp : (step0 (clearOut s) .signOut).1.session.phase = .signedOut := by
-    show (driveSession { (clearOut s) with problem := none, accountOpen := false } .signOut).1.session.phase = .signedOut
+    show (driveSession { (clearOut s) with problem := none } .signOut).1.session.phase = .signedOut
     simp only [driveSession]
-    have hd : (drive { (clearOut s) with problem := none, accountOpen := false } .signOut).1.session.phase = .signedOut :=
+    have hd : (drive { (clearOut s) with problem := none } .signOut).1.session.phase = .signedOut :=
       (drive_same _ _).2.2.trans (signOut_phase _)
     split
     · rw [startRefresh_dead (by simp [live, hd])]; exact hd
@@ -1265,12 +1295,6 @@ theorem signOut_post1 (s : State) :
   rw [step1_fst, (tidy_core _).session, (tidy_core _).feed, settle_fst]
   simp only [hl, Bool.false_eq_true, ↓reduceIte]
   exact ⟨hp2, trivial⟩
-
-/-- Account, while signed in: the panel opens or closes, the feed stays. -/
-theorem toggleAccount_post {s : State} (h : live s.session = true) :
-    (s.step .toggleAccount).1.accountOpen = !s.accountOpen ∧ (s.step .toggleAccount).1.feed = s.feed := by
-  have c := step1_live (s := s.blank) (c := .toggleAccount) h rfl
-  exact ⟨c.accountOpen, c.feed⟩
 
 /-- Sign out: signed out, the feed empty. -/
 theorem signOut_post (s : State) :
@@ -1299,10 +1323,11 @@ theorem act_tables {s : State} {kind : Kind} {k : Nat} (h : live s.session = tru
   rw [step1_fst, tidy_acts]
   have hf := flushIf_flushed (live s.blank.session) (step0 (clearOut s.blank) (.act kind k)).1
   have hl : live (flushIf (live s.blank.session) (step0 (clearOut s.blank) (.act kind k)).1).1.session = true := by
-    rw [hf.live]; show live (actPress (clearOut s.blank) kind k).session = true
-    rw [actPress_session]; exact h
-  rw [settle_live hl]
-  exact flushIf_tables _ _
+    rw [hf.live]; show live (actStep (clearOut s.blank) kind k).1.session = true
+    rw [(actStep_core _ _ _).1]; exact h
+  rw [settle_live hl, flushIf_tables]
+  show (actStep (clearOut s.blank) kind k).1.acts.tables = _
+  rw [(actStep_core _ _ _).2.2.2.2.2]
 
 /-- Signed out, the acts hold nothing: `settle` drops them. -/
 def ActsGone (s : State) : Prop := live s.session = false → s.acts.isEmpty = true
@@ -1348,5 +1373,50 @@ theorem act_post {s : State} {kind : Kind} {k : Nat} (h : canAct s kind k = true
   | follow =>
     simp only [actPress, hc, hit', ↓reduceIte]
     exact Acts.toggle_on _ _ _ (by decide) _
+
+/-! ## Copy link and Undo (^53, ^58) -/
+
+/-- Copy Link, while signed in: the feed, the session and the tables stay. -/
+theorem copyLink_post {s : State} (h : live s.session = true) (k : Nat) :
+    (s.step (.copyLink k)).1.feed = s.feed ∧ (s.step (.copyLink k)).1.session = s.session ∧
+      (s.step (.copyLink k)).1.acts.tables.likes = s.acts.tables.likes := by
+  have e : (step0 (clearOut s.blank) (.copyLink k)).1 = clearOut s.blank := by
+    simp only [step0, Sky.copyLink]; split <;> rfl
+  have l := step1_live (s := s.blank) (c := .copyLink k) (by rw [e]; exact h) (by rw [e]; rfl)
+  refine ⟨l.feed.trans (by rw [e]; rfl), l.session.trans (by rw [e]; rfl), ?_⟩
+  show (step1 s.blank (.copyLink k)).1.acts.tables.likes = _
+  rw [step1_fst, tidy_acts, e, flushIf_nil (s := clearOut s.blank) rfl, settle_live (s := clearOut s.blank) h]
+  rfl
+
+theorem undoMuteStep_session (s : State) : (undoMuteStep s).session = s.session := by
+  unfold undoMuteStep; split
+  · split <;> rfl
+  · rfl
+
+/-- Undo, while offered: the account it names shows unmuted after the step. -/
+theorem undoMute_post {s : State} (h : canUndoMute s = true) {d : String} (hd : s.undoMute = some d) :
+    (s.step .undoMute).1.acts.muted d = false := by
+  have hl : live s.session = true := by
+    simp only [canUndoMute, Bool.and_eq_true] at h; exact h.1
+  have hm : s.acts.muted d = true := by
+    simp only [canUndoMute, hd, Bool.and_eq_true] at h; exact h.2
+  have h' : canUndoMute (clearOut s.blank) = true := h
+  have e : (step0 (clearOut s.blank) .undoMute).1 =
+      { (clearOut s.blank) with acts := (clearOut s.blank).acts.toggleMute d, undoMute := none } := by
+    simp only [step0, undoMuteStep, show (clearOut s.blank).undoMute = some d from hd, h', ↓reduceIte]
+  show (step1 s.blank .undoMute).1.acts.muted d = false
+  rw [step1_fst, tidy_acts]
+  have hf := flushIf_flushed (live s.blank.session) (step0 (clearOut s.blank) .undoMute).1
+  have hl2 : live (flushIf (live s.blank.session) (step0 (clearOut s.blank) .undoMute).1).1.session = true := by
+    rw [hf.live, e]; exact hl
+  rw [settle_live hl2]
+  show ((flushIf _ _).1.acts.tables.mutes.shown d) = false
+  rw [flushIf_tables, e]
+  have := Acts.toggleMute_on (clearOut s.blank).acts d
+  simp only [Acts.on] at this
+  show ((clearOut s.blank).acts.toggleMute d).tables.mutes.shown d = false
+  rw [this]
+  have : (clearOut s.blank).acts.tables.mutes.shown d = true := hm
+  rw [this]; rfl
 
 end Sky

@@ -8,7 +8,11 @@ import Foundation
 //   Sky                                   open the window
 //   Sky --selftest <server.ts> [--shots <dir>]
 //       sign in to cairn_atproto's fake PDS (`server.ts`, run here with Bun on 127.0.0.1) by
-//       typing in the form, read the feed, quit and resume, sign out (Selftest.swift)
+//       typing in the form, read the feed, act on posts (like, repost, follow, mute, a refused
+//       like and a lost one), quit and resume, sign out from the app menu (Selftest.swift)
+//   Sky --act-frames <server.ts> <dir>
+//       liking and muting against the fake, its replies slowed, rendered offscreen at 30 frames
+//       a second into <dir>/like and <dir>/mute (ActFrames.swift; `make act-media`)
 //   Sky --bench [<server.ts>]
 //       first page, refresh, flings through 1,000 posts and memory against the fake PDS
 //       (Bench.swift, bench/README.md); `cairn bench` runs it from the package's root
@@ -30,6 +34,16 @@ if let i = CommandLine.arguments.firstIndex(of: "--selftest") {
     }
     let shots = args.firstIndex(of: "--shots").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
     Selftest(server: args[i + 1], shots: shots).run()
+    exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--act-frames") {
+    let args = CommandLine.arguments
+    guard i + 2 < args.count else {
+        FileHandle.standardError.write(Data("act-frames: give the fake PDS's server.ts and a directory\n".utf8))
+        exit(2)
+    }
+    ActFrames(server: args[i + 1], dir: args[i + 2]).run()
     exit(0)
 }
 

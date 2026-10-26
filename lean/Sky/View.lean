@@ -12,8 +12,8 @@ Cancel once it has taken a few seconds, and what went wrong, in words. Signed in
 (Following) in a virtual list: each post with its avatar, name, handle and time, its text
 wrapped, up to four images (loaded as their rows come into view), "Reposted by" and "Replying
 to", other embeds as one line and the counts; the end row loads more as it comes into view.
-Refresh and Account in the header; new posts put above the reader are offered as "N new
-posts". -/
+Refresh in the header; new posts put above the reader are offered as "N new posts". Under each
+post, its replies, Repost and Like, and the ⋯ menu; Sign Out and Refresh (⌘R) in the menu bar. -/
 
 @[expose] public section
 
@@ -217,8 +217,7 @@ def mediaLine : Media → Option String
   | .external e => some ((if e.title.isEmpty then e.uri else e.title) ++ " · " ++ domainOf e.uri)
   | .other t => some (if (t.splitOn "video").length > 1 then "Video" else "Embedded content")
 
-/-- What a muted account's post shows instead of itself (^42). -/
-def mutedWords : String := "Post from an account you muted"
+/-- What a quoted post by a muted account shows instead of itself (^42). -/
 def mutedQuote : String := "Quoted post from an account you muted"
 
 /-- A quoted post's line, unless its author is muted. -/
@@ -252,60 +251,118 @@ def contextLines (it : FeedItem) : List Node :=
 
 def plural (n : Nat) (one many : String) : String := s!"{n} " ++ (if n = 1 then one else many)
 
-/-- The counts, with the likes and reposts as the acts show them (`Acts.likeCount`). -/
-def countsLine (s : State) (p : Post) : String :=
-  plural p.replyCount "reply" "replies" ++ " · " ++ plural (s.acts.repostCount p) "repost" "reposts" ++
-    " · " ++ plural (s.acts.likeCount p) "like" "likes"
+/-! ## A post's actions
 
-/-- A small text button for an act on row `k` (^37–^40): its control is `⟨claim, k⟩`, inside the
-row's own (the innermost control wins a press). -/
-def actLink (ui : UI) (claim k : Nat) (t name : String) : Node :=
-  .box { height := .fixed lineH, align := .center, padding := ⟨0, 2, 0, 2⟩,
-         border := ring ui ⟨claim, k⟩ }
-    (some { ref := ⟨claim, k⟩, label := name })
-    [.text { font := { size := 12, weight := 600 }, color := accent } t]
-
-/-- The acts a row offers, each exactly when it can be pressed (`canAct`). -/
-def actsRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
-  let p := it.post
-  let h := "@" ++ p.author.handle
-  let one (kind : Kind) (claim : Nat) (t name : String) : List Node :=
-    if canAct s kind k then [actLink ui claim k t name] else []
-  .box { axis := .row, width := .fill, height := .fixed lineH, gap := 14, align := .center } none
-    (one .like 37 (if s.acts.liked p.uri then "Unlike" else "Like")
-        ((if s.acts.liked p.uri then "Unlike " else "Like ") ++ h ++ "'s post") ++
-     one .repost 38 (if s.acts.reposted p.uri then "Undo repost" else "Repost")
-        ((if s.acts.reposted p.uri then "Undo repost of " else "Repost ") ++ h ++ "'s post") ++
-     one .follow 39 (if s.acts.following p.author.did then "Unfollow" else "Follow")
-        ((if s.acts.following p.author.did then "Unfollow " else "Follow ") ++ h) ++
-     one .mute 40 "Mute" ("Mute " ++ h))
-
-/-- A row hidden because its author, or its reposter, is muted (^42): the words and Unmute,
-nothing of the post. The words are the row's own control (^32); Unmute sits beside it, since a
+Under each post: the reply count (read only), then Repost and Like as toggles with their counts
+(`checked` and `selected` are what the table shows, so VoiceOver says "selected"), then the ⋯
+button (^52), whose menu has Follow or Unfollow and Mute (^39, ^40, not on the account's own
+posts), Copy Link to Post (^53) and Open on bsky.app (^54). The secondary click on the post, or on
+either toggle, opens the same menu. They sit outside the post's own control (^32), since a
 control can't hold another. -/
-def mutedRow (s : State) (ui : UI) (k : Nat) : Node :=
-  let r : ControlRef := ⟨32, k⟩
-  .box { width := .fill, background := some white } none
-    [ .box { axis := .row, width := .fill, padding := ⟨0, 14, 0, 0⟩, gap := 10, align := .center } none
-        ([ .box { width := .fill, padding := ⟨12, 0, 12, 14⟩, border := ring ui r }
-              (some { ref := r, role := .listItem, appear := true, label := mutedWords })
-            [ .box { width := .fill, height := .fixed lineH, clip := true } none
-                [.text { font := { size := 13 }, color := muted } mutedWords] ] ] ++
-         (if canAct s .mute k then [actLink ui 40 k "Unmute" "Unmute the account"] else [])),
-      .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
-/-- A post: the avatar, then who and when, the text, the images, other embeds and the counts,
-which together open the post (^32) and tell Sky when they come into view, to load the images;
-then the acts (^37–^40), outside that control, since a control can't hold another. -/
+/-- Follow or Unfollow, as the follows' table shows the account. -/
+def followWords (following : Bool) (h : String) : String :=
+  (if following then "Unfollow " else "Follow ") ++ h
+
+/-- Mute or Unmute, as the mutes' table shows the account. -/
+def muteWords (muted : Bool) (h : String) : String :=
+  (if muted then "Unmute " else "Mute ") ++ h
+
+def copyLinkWords : String := "Copy Link to Post"
+def openWords : String := "Open on bsky.app"
+
+/-- The ⋯ button's ref on row `k` (^52). -/
+def moreRef (k : Nat) : ControlRef := ⟨52, k⟩
+
+/-- A post's menu (^52): Follow or Unfollow and Mute or Unmute its author, each as the table
+shows (^57), on someone else's post; then Copy Link to Post and Open on bsky.app. -/
+def postMenu (s : State) (k : Nat) (it : FeedItem) : List MenuItem :=
+  let h := "@" ++ it.post.author.handle
+  let acct : List MenuItem :=
+    (if canAct s .follow k then [.item { ref := ⟨39, k⟩, label := followWords (s.acts.following it.post.author.did) h }]
+     else []) ++
+    (if canAct s .mute k then [.item { ref := ⟨40, k⟩, label := muteWords (s.acts.muted (muteTarget s it)) h }]
+     else [])
+  acct ++ (if acct.isEmpty then [] else [.separator]) ++
+    [.item { ref := ⟨53, k⟩, label := copyLinkWords }, .item { ref := ⟨54, k⟩, label := openWords }]
+
+def plainCount (n : Nat) : String := if n = 0 then "" else s!" {n}"
+
+/-- The Like toggle's control on row `k` (^37): checked and selected as the likes' table shows the
+post (^55), with the post's menu. -/
+def likeControl (s : State) (k : Nat) (it : FeedItem) : Control :=
+  let on := s.acts.liked it.post.uri
+  { ref := ⟨37, k⟩, label := "Like, " ++ plural (s.acts.likeCount it.post) "like" "likes",
+    checked := some on, selected := on }
+
+/-- The Repost toggle's control on row `k` (^38), as the reposts' table shows the post (^55). -/
+def repostControl (s : State) (k : Nat) (it : FeedItem) : Control :=
+  let on := s.acts.reposted it.post.uri
+  { ref := ⟨38, k⟩, label := "Repost, " ++ plural (s.acts.repostCount it.post) "repost" "reposts",
+    checked := some on, selected := on }
+
+def likeRed : Color := ⟨214, 36, 96, 255⟩
+def repostGreen : Color := ⟨22, 150, 90, 255⟩
+
+/-- A toggle: its glyph and count, coloured when on, greyed while its write is in flight. -/
+def toggle (s : State) (ui : UI) (k : Nat) (it : FeedItem) (c : Control) (glyph : String)
+    (n : Nat) (onColor : Color) (busy : Bool) : Node :=
+  let on := c.checked == some true
+  .box { axis := .row, height := .fixed 22, align := .center, padding := ⟨0, 8, 0, 8⟩, radius := 11,
+         background := if ui.hover = some c.ref then some ⟨240, 240, 244, 255⟩ else none,
+         border := ring ui c.ref, menu := some { items := postMenu s k it } }
+    (some c)
+    [.text { font := { size := 13, weight := if on then 600 else 400 },
+             color := if busy then greyed else if on then onColor else muted } (glyph ++ plainCount n)]
+
+/-- The ⋯ button (^52): a menu button with the post's menu. -/
+def moreButton (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
+  .box { height := .fixed 22, align := .center, justify := .center, padding := ⟨0, 8, 0, 8⟩, radius := 11,
+         background := if ui.menu = some (moreRef k) || ui.hover = some (moreRef k) then some ⟨236, 236, 240, 255⟩ else none,
+         border := ring ui (moreRef k),
+         menu := some { items := postMenu s k it, button := true } }
+    (some { ref := moreRef k, label := "More for @" ++ it.post.author.handle ++ "'s post" })
+    [.text { font := { size := 14, weight := 700 }, color := muted } "⋯"]
+
+/-- The like toggle, exactly when it can be pressed (^55: on every row that shows, signed in). -/
+def likeNodes (s : State) (ui : UI) (k : Nat) (it : FeedItem) : List Node :=
+  if canAct s .like k then
+    [toggle s ui k it (likeControl s k it) (if s.acts.liked it.post.uri then "♥" else "♡")
+      (s.acts.likeCount it.post) likeRed (s.acts.tables.likes.inFlight it.post.uri)]
+  else []
+
+def repostNodes (s : State) (ui : UI) (k : Nat) (it : FeedItem) : List Node :=
+  if canAct s .repost k then
+    [toggle s ui k it (repostControl s k it) "⇄" (s.acts.repostCount it.post) repostGreen
+      (s.acts.tables.reposts.inFlight it.post.uri)]
+  else []
+
+/-- The row of actions: the reply count, Repost, Like and ⋯. -/
+def actsRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
+  .box { axis := .row, width := .fill, height := .fixed 22, gap := 18, align := .center } none
+    ([ .box { width := .fixed 64, height := .fixed 22, align := .start, justify := .center } none
+         [.text { font := { size := 13 }, color := muted } ("↩" ++ plainCount it.post.replyCount)] ] ++
+     repostNodes s ui k it ++ likeNodes s ui k it ++
+     [ .box { width := .fill } none [], moreButton s ui k it ])
+
+/-- A row hidden by a mute (^42): a point high, with no control and nothing of the post, so its
+key stays in the list and the reader's post stays where it is (^35). A point, not zero: Cairn's
+virtual list counts every row as at least a point high (`VList.model_good`). -/
+def hiddenRow : Node := .box { width := .fill, height := .fixed 1, background := some white } none []
+
+/-- A post: the avatar, then who and when, the text, the images and other embeds, which together
+open the post (^32), with its menu on the secondary click, and tell Sky when they come into view,
+to load the images; then the actions, outside that control, since a control can't hold
+another. -/
 def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
-  if hiddenItem s it then mutedRow s ui k else
+  if hiddenItem s it then hiddenRow else
   let p := it.post
   let r : ControlRef := ⟨32, k⟩
   let bg : Color := if ui.hover = some r then ⟨248, 248, 250, 255⟩ else white
   .box { width := .fill, background := some bg } none
-    [ .box { width := .fill, border := ring ui r }
+    [ .box { width := .fill, border := ring ui r, menu := some { items := postMenu s k it } }
         (some { ref := r, role := .listItem, appear := true, label := "Post by @" ++ p.author.handle })
-        [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 6, 14⟩, gap := 10 } none
+        [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 4, 14⟩, gap := 10 } none
             [ avatar s p.author,
               .box { width := .fill, gap := 5 } none
                 (contextLines it ++
@@ -316,9 +373,8 @@ def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
                        .text { font := { size := 13 }, color := muted } ("· " ++ relTime s.now p.createdAt) ] ] ++
                  (if p.text.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} p.text]) ++
                  images s (thumbsOf p.embed) ++
-                 (embedLines s p.embed).map embedLine ++
-                 [textLine (countsLine s p) muted 12]) ] ],
-      .box { width := .fill, padding := ⟨0, 14, 10, 64⟩ } none [actsRow s ui k it],
+                 (embedLines s p.embed).map embedLine) ] ],
+      .box { width := .fill, padding := ⟨0, 14, 8, 56⟩ } none [actsRow s ui k it],
       .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
 def endH : Nat := 64
@@ -360,16 +416,6 @@ def who (s : State) : String :=
   | some a => "@" ++ a.handle
   | none => ""
 
-/-- The account panel: where the session is, and Sign out. -/
-def accountPanel (s : State) (ui : UI) : List Node :=
-  if s.accountOpen then
-    [ .box { axis := .row, width := .fill, height := .fixed 30, gap := 8, align := .center,
-             padding := ⟨0, 8, 0, 8⟩, background := some white, radius := 6 } none
-        [ .box { width := .fill, height := .fixed lineH, clip := true } none
-            [.text { font := { size := 12 }, color := muted } (who s ++ " on " ++ s.host)],
-          button ui 11 "Sign out" 84 ] ]
-  else []
-
 /-- The new posts above the reader, when there are any (^33). -/
 def newPosts (s : State) (ui : UI) : List Node :=
   if canShowNew s then
@@ -379,16 +425,27 @@ def newPosts (s : State) (ui : UI) : List Node :=
         [.text { font := { size := 12, weight := 600 }, color := white } ("↑ " ++ newPostsLabel s.fresh)] ]
   else []
 
-/-- One line under the header, always there so the list never moves: the new posts, and what
-the feed is doing or what went wrong. -/
+/-- What the status line says after a mute: the account, and Undo (^58). -/
+def mutedLine (s : State) : String :=
+  match s.undoMute with
+  | some d => "Muted " ++ (match s.acts.handles[d]? with
+      | some h => "@" ++ h
+      | none => "the account") ++ ". Their posts are hidden."
+  | none => ""
+
+/-- One line under the header, always there so the list never moves: the new posts, then a
+rollback said in words (for `lineMs`), or a mute just made with Undo, or what went wrong, or what
+the feed is doing. -/
 def statusRow (s : State) (ui : UI) : Node :=
   .box { axis := .row, width := .fill, height := .fixed 24, gap := 8, align := .center } none
     (newPosts s ui ++
      [ .box { width := .fill, height := .fixed lineH, clip := true } none
-        [match s.problem, s.acts.line with
-         | some p, _ => .text { font := { size := 12 }, color := alert } p
-         | none, some l => .text { font := { size := 12 }, color := alert } l
-         | none, none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ])
+        [match s.acts.line, canUndoMute s, s.problem with
+         | some l, _, _ => .text { font := { size := 12 }, color := alert } l
+         | none, true, _ => .text { font := { size := 12 }, color := ink } (mutedLine s)
+         | none, false, some p => .text { font := { size := 12 }, color := alert } p
+         | none, false, none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ] ++
+     (if canUndoMute s then [link ui 58 "Undo"] else []))
 
 /-! ## The notifications -/
 
@@ -457,8 +514,37 @@ def notesLine (s : State) : String :=
       (if s.notes.list.refresh.isSome then " · refreshing" else "") ++
       (if s.notes.list.loadMore.isSome then " · loading more" else "")
 
-/-- Signed in: the header (what shows, who, Refresh, the other tab, Account), the account panel,
-the status line and the list: the feed's, or the notifications'. -/
+/-- The known rows for `keys`, each hidden row (`hidden`) a point high whether laid yet or not:
+`rs` is what the runtime knew, moved to the keys' indices (`VList.align`), sorted by index. -/
+def hideRows (hidden : Nat → Bool) : List (Nat × Nat) → List VList.Row → List VList.Row
+  | [], _ => []
+  | (k, i) :: ks, rs =>
+    let rs := rs.dropWhile (·.index < i)
+    let here := match rs with
+      | r :: _ => decide (r.index = i)
+      | [] => false
+    let rest := if here then rs.drop 1 else rs
+    if hidden k then { index := i, key := k, height := 1 } :: hideRows hidden ks rest
+    else if here then rs.take 1 ++ hideRows hidden ks rest
+    else hideRows hidden ks rest
+
+/-- What the feed's list is laid by: the runtime's record, with every row a mute hides known at
+the point it lays at. A mute can hide many rows at once, each recorded taller; laid by the
+record alone, the list would learn them a window at a time, a layout each, and could show a
+frame laid by heights it no longer has. Known, the list is laid right in the layout after the
+mute, and the record keeps the post being read still (`VList.record_keeps`, ^35). Until the
+runtime settles a list however many layouts it takes (cairn#276). -/
+def feedUI (s : State) (ui : UI) : UI :=
+  if s.acts.tables.mutes.size == 0 then ui else
+  let r := listRef s
+  let keys := s.rows.keys
+  let fix (k : VList.Known) : VList.Known :=
+    { k with rows := (hideRows (hiddenAt s) keys.toList.zipIdx (VList.align keys k).toList).toArray,
+             count := keys.size }
+  { ui with lists := ui.lists.map fun (x, k) => if x == r then (x, fix k) else (x, k) }
+
+/-- Signed in: the header (what shows, who, Refresh, the other tab), the status line and the
+list: the feed's, or the notifications'. Sign Out is in the app menu (^49). -/
 def feedView (s : State) (ui : UI) : List Node :=
   let home := s.tab == .home
   [ .box { axis := .row, width := .fill, height := .fixed 30, gap := 8, align := .center } none
@@ -467,12 +553,10 @@ def feedView (s : State) (ui : UI) : List Node :=
           [.text { font := { size := 12 }, color := muted } (who s)],
         (if home then (if canRefresh s then button ui 4 "Refresh" 84 else greyButton "Refresh" 84)
          else (if canNoteRefresh s then button ui 63 "Refresh" 84 else greyButton "Refresh" 84)),
-        (if home then button ui 61 (notesLabel s) 150 else button ui 62 "Home" 84),
-        button ui 13 (if s.accountOpen then "Done" else "Account") 84 ] ] ++
-  accountPanel s ui ++
+        (if home then button ui 61 (notesLabel s) 150 else button ui 62 "Home" 84) ] ] ++
   (if home then
     [ statusRow s ui,
-      VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
+      VList.node (feedList s) (feedUI s ui) s.rows.keys (rowOf s ui) ]
    else
     [ .box { axis := .row, width := .fill, height := .fixed 24, align := .center } none
         [ .box { width := .fill, height := .fixed lineH, clip := true } none
@@ -483,5 +567,18 @@ def view (s : State) (ui : UI) : Node :=
   .box { width := .fill, height := .fill, padding := ⟨pad, pad, pad, pad⟩, gap := 7,
          background := some paper, clip := true } none
     (if live s.session then feedView s ui else signInView s ui)
+
+/-! ## The menu bar -/
+
+def signOutRef : ControlRef := ⟨49, 0⟩
+def refreshMenuRef : ControlRef := ⟨51, 0⟩
+
+/-- Sky's own items in the menu bar (^48): Sign Out at the top of the app menu, enabled exactly
+when signed in (^56); a View menu (^50) with Refresh, ⌘R (^51). -/
+def menuBar (s : State) : List MenuItem :=
+  [ .item { ref := signOutRef, label := "Sign Out" } (enabled := live s.session),
+    .submenu "View" (some 50)
+      [ .item { ref := refreshMenuRef, label := "Refresh" } (enabled := canRefresh s)
+          (shortcut := some { key := .char 'r' }) ] ]
 
 end Sky

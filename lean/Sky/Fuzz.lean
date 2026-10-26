@@ -196,15 +196,15 @@ def worldGen : Gen World := do
     return w0
   return w.saved
 
-/-- Like, repost, follow and mute pressed often, so their writes race; Sign out only once a
-page is in, and seldom, like Cancel, since a world whose password can't be typed stays signed
-out after them. The notifications and both Retries often enough that their rows come into
-view, load more and refresh. -/
+/-- Like, repost, follow and mute pressed often, so their writes race; Undo after a mute too;
+Sign Out (the app menu) only once a page is in, and seldom, like Cancel, since a world whose
+password can't be typed stays signed out after them. The notifications and both Retries often
+enough that their rows come into view, load more and refresh. -/
 def weights (s : State) (r : ControlRef) : Nat :=
   if r.claim == 37 || r.claim == 38 then 6
-  else if r.claim == 39 || r.claim == 40 then 3
-  else if r.claim == 11 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)
-  else if r.claim == 12 || r.claim == 13 then 1
+  else if r.claim == 39 || r.claim == 40 || r.claim == 58 then 3
+  else if r.claim == 49 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)
+  else if r.claim == 12 then 1
   else if r.claim == 61 || r.claim == 65 || r.claim == 31 then 4
   else 2
 
@@ -286,10 +286,6 @@ def fuzz : Cairn.Fuzz.Custom State where
     | 7 => some FakeCheck.typePassword
     | 8 => some FakeCheck.typeService
     | _ => none
-  -- Cairn 0.5.0's presence check counts a list that left as hidden for good, so after a refresh
-  -- (a new list ref) the controls in the new list's rows fail it (cairn#268, fixed for 0.5.1).
-  -- Until that release, the row moves are exempt from presence; drop this with the bump.
-  noControl := [30, 31, 32, 37, 38, 39, 40, 64, 65, 66]
   weights := FakeCheck.weights
   server := some { CairnAtproto.Fake.server (S := State) {}
       [(24, FakeCheck.feedOk), (41, FakeCheck.actsHeld), (41, FakeCheck.countsHeld),

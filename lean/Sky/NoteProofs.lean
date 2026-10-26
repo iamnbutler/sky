@@ -258,6 +258,15 @@ theorem noteAppear_post {s : State} (h : live s.session = true) (k : Nat) :
 /-- The newest notification that has appeared on screen, as the seen marker holds it. -/
 def State.seenMark (s : State) : Nat := s.notes.seen.1.mark
 
+theorem actPress_notes (s : State) (kind : Kind) (k : Nat) : (actPress s kind k).notes = s.notes := by
+  unfold actPress; split <;> (try split) <;> (try split) <;> rfl
+
+theorem actStep_notes (s : State) (kind : Kind) (k : Nat) : (actStep s kind k).1.notes = s.notes := by
+  have h := actPress_notes s kind k
+  unfold actStep; dsimp only; split
+  · split <;> exact h
+  · exact h
+
 theorem onAnswer0_notes (s : State) (id : Nat) (a : Answer) : (onAnswer0 s id a).1.notes = s.notes := by
   unfold onAnswer0
   generalize readPage a = pr
@@ -383,14 +392,16 @@ theorem step0_mark (s : State) (c : Cmd) : MarkStep s (step0 s c).1 := by
       · exact Or.inr ⟨g, List.mem_of_find?_eq_some hg, by omega⟩
     · exact .le (Nat.le_refl _)
   | act kind k =>
-    apply MarkStep.le
-    show (actPress s kind k).seenMark ≤ _
-    unfold actPress
-    split
-    · split
-      · split <;> exact Nat.le_refl _
-      · exact Nat.le_refl _
-    · exact Nat.le_refl _
+    show MarkStep s (actStep s kind k).1
+    exact .le (Nat.le_of_eq (congrArg (·.seen.1.mark) (actStep_notes s kind k)))
+  | undoMute =>
+    show MarkStep s (undoMuteStep s)
+    unfold undoMuteStep; split
+    · split <;> exact .le (Nat.le_refl _)
+    · exact .le (Nat.le_refl _)
+  | copyLink k =>
+    show MarkStep s (Sky.copyLink s k).1
+    unfold Sky.copyLink; split <;> exact .le (Nat.le_refl _)
   | msg m =>
     simp only [step0]
     cases m with
@@ -421,7 +432,7 @@ theorem step0_mark (s : State) (c : Cmd) : MarkStep s (step0 s c).1 := by
       · exact .le (Nat.le_refl _)
       · split
         · exact MarkStep.calm ((hearSeen_calm _ _).trans (flushNotes_calm _))
-        · exact .le (Nat.le_refl _)
+        · split <;> exact .le (Nat.le_refl _)
     | sub sb e =>
       cases e
       case tick =>

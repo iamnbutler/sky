@@ -9,7 +9,8 @@ secure field, the service (`https://bsky.social` unless the `service` default sa
 Sign in, and what went wrong in words. The session's tokens live in the Keychain and go on every
 call from there; Lean never holds one. The handle and service are saved in
 `~/Library/Application Support/dev.cairn.sky/account.json`, so the next launch resumes the
-session; Sign out (in the account panel) forgets both Keychain items and that file.
+session; Sky ▸ Sign Out in the menu bar forgets both Keychain items and that file. View ▸
+Refresh (⌘R) refreshes the feed, as the header's Refresh does.
 
 Signed in, Sky shows the home feed (cairn#211) in Cairn's virtual list (`VList`): each post's
 avatar, name, handle and age, its text wrapped, its images (placeholders until loaded),
@@ -19,12 +20,17 @@ Loading…, "Couldn't load more." with Retry, or "You're all caught up." Refresh
 above without moving the reader, and offers "↑ N new posts" to go back to the top. Images load
 for rows near the view (at most 6 at a time) and are cancelled as the reader moves away.
 
-Under each post (cairn#252): Like, Repost, Follow (on others' posts) and Mute. A press shows in
-the same frame, everywhere the post or account appears, counts included; Sky then writes the
-record (or mutes) and settles on the server's answer: a refusal shows what was there before and
-says why in the status line; a lost answer is read back from the account's own repo before it
-is believed. A muted account's posts, and its reposts, show as "Post from an account you muted"
-with Unmute; a post quoting it says "Quoted post from an account you muted".
+Under each post (cairn#252, cairn#254): the reply count, then Repost (⇄) and Like (♡/♥)
+toggles with their counts (checked as the tables show, greyed while the write is in flight), and
+⋯, the post's menu, which the secondary click on the post or a toggle opens too: Follow or
+Unfollow and Mute or Unmute its author (on others' posts), Copy Link to Post and Open on
+bsky.app. A press shows in the same frame, everywhere the post or account appears, counts
+included; Sky then writes the record (or mutes) and settles on the server's answer: a refusal
+shows what was there before and says why in the status line for 8 seconds, read out by
+VoiceOver; a lost answer is read back from the account's own repo before it is believed. A muted
+account's posts, and its reposts, are gone from the feed without moving the post being read:
+each row keeps its key and lays a point high. The status line says "Muted @handle" with Undo for
+8 seconds; a post quoting a muted account says "Quoted post from an account you muted".
 
 Notifications (cairn#253) show in their own virtual list, one press from the header, whose
 button carries the unread count. Likes, reposts and follows of the same post (or of you) next to
@@ -63,12 +69,13 @@ after a refresh, at sign-in and once the server has the new seen time, at most o
   row on screen raising the mark, and signed out, no notes and no poll.
 - `Rows`: the list's keys (posts put on top get the keys below the first, so nothing below
   moves), and the image loads near the view.
-- `View`: the sign-in screen, the account panel and the feed's virtual list.
+- `View`: the sign-in screen, the feed's and the notifications' virtual lists, a post's menu, and
+  the menu bar (Sky ▸ Sign Out, View ▸ Refresh).
 - `Claims`: places, moves and invariants. `Fuzz`: the checks against cairn_atproto's fake PDS.
 
 | Id | Kind | Claim |
 |---|---|---|
-| ^1 | place | the window: the sign-in screen, or the feed |
+| ^1 | place | the window: the sign-in screen, the feed or the notifications |
 | ^2 | move | Sign in (retired: reissued as ^10) |
 | ^3 | move | Load more (retired: the end row loads more, ^30 and ^31) |
 | ^4 | move | Refresh |
@@ -78,9 +85,9 @@ after a refresh, at sign-in and once the server has the new seen time, at most o
 | ^8 | move | the Service field |
 | ^9 | move | What's an app password? (opens Bluesky's page) |
 | ^10 | move | Sign in: enabled exactly when both fields are typed in and no sign-in is in flight |
-| ^11 | move | Sign out, in the account panel |
+| ^11 | move | Sign out, in the account panel (retired: reissued as ^49, in the app menu) |
 | ^12 | move | Cancel a sign-in or resume, offered once it has taken a few seconds |
-| ^13 | move | Account: open or close the account panel |
+| ^13 | move | Account (retired: the account panel is gone; Sign Out is in the app menu) |
 | ^14 | place | the feed: a virtual list of posts and the end row |
 | ^20–^23 | invariant | retired: the feed is cairn_atproto's `Paged` list, proved there (`cairn_atproto^26`–`^29`) |
 | ^24 | invariant | at most one load-more and one refresh in flight; every call answered, cancelled or live |
@@ -96,17 +103,28 @@ after a refresh, at sign-in and once the server has the new seen time, at most o
 | ^34 | invariant | posts keep their keys (retired: reissued as ^46) |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
 | ^36 | invariant | image loads only near the view (retired: reissued as ^47) |
-| ^37 | move | Like or Unlike a post |
-| ^38 | move | Repost or Undo repost |
-| ^39 | move | Follow or Unfollow a post's author |
-| ^40 | move | Mute a post's author, or Unmute on a hidden row |
+| ^37 | move | Like or Unlike a post: the ♡ toggle |
+| ^38 | move | Repost or Undo repost: the ⇄ toggle |
+| ^39 | move | Follow or Unfollow a post's author, in its menu |
+| ^40 | move | Mute or Unmute a post's author, in its menu |
 | ^41 | invariant | likes, reposts, follows and mutes settle on the server's; counts through `count` |
-| ^42 | invariant | a muted account's posts appear nowhere |
+| ^42 | invariant | a muted account's posts appear nowhere: their rows lay a point high, with no control |
 | ^43 | invariant | signed out ⇒ the acts hold nothing |
 | ^44 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
 | ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
 | ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
 | ^47 | invariant | image loads only for rows near the view; none signed out |
+| ^48 | place | Sky's menus in the menu bar |
+| ^49 | move | Sign Out, in the app menu |
+| ^50 | place | the View menu |
+| ^51 | move | View ▸ Refresh, ⌘R |
+| ^52 | place | a post's menu: its ⋯ button and the secondary click on the post |
+| ^53 | move | Copy Link to Post, in a post's menu |
+| ^54 | move | Open on bsky.app, in a post's menu |
+| ^55 | invariant | Like and Repost: on every post that shows exactly when signed in; checked as the table shows |
+| ^56 | invariant | Sign Out is in the app menu, enabled exactly when signed in |
+| ^57 | invariant | a post's menu says Follow or Unfollow, Mute or Unmute, as the tables show |
+| ^58 | move | Undo a mute, in the status line |
 | ^60 | place | the notifications: a virtual list of grouped rows and the end row |
 | ^61 | move | Notifications (with the unread count): show the notifications |
 | ^62 | move | Home: back to the feed |
@@ -133,9 +151,16 @@ is checked against what the server holds. The selftest
 127.0.0.1 and drives the app through Cairn's engine: a wrong password, a rate limit, offline and
 a slow sign-in, each in words; then signs in by typing, waits for images, scrolls with the wheel,
 loads more by scrolling to the end, refreshes with posts arriving (the first post in view stays
-put and "3 new posts" is offered, then taken back to the top), quits and resumes, and signs out. It runs with a home of its own (`build/home`), refuses every host but 127.0.0.1,
+put and "3 new posts" is offered, then taken back to the top), opens the notifications, then,
+with the fake's replies slowed, likes, unlikes, reposts and follows (from ⋯), has a like refused
+and rolled back with its line, has a like's reply lost and settled by a read, mutes an author
+mid-feed (their posts gone, the post being read still) and undoes it; quits and resumes, and
+signs out from the app menu. It runs with a home of its own (`build/home`), refuses every host but 127.0.0.1,
 keeps its Keychain items under a throwaway service it deletes, stops the server, and leaves
 offscreen renders of each screen in `build/shots`.
+
+`make act-media` renders liking and muting against the fake offscreen at 30 frames a second
+(`Sky --act-frames`) and makes `build/media/act-like.mov` and `act-mute.mov` with ffmpeg.
 
 `make bench` and `make bench-lean`: first page, refresh, flings through 1,000 posts, memory
 and size against the fake PDS, with the numbers in [bench/README.md](bench/README.md).
