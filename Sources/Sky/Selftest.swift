@@ -76,20 +76,20 @@ final class LoopbackOnly: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-/// The Keychain under a throwaway service, remembering every item it wrote. Calls go one at a
-/// time: the file-based keychain deadlocks a read racing a delete (cairn#237).
+/// The Keychain under a throwaway service, remembering every item it wrote. `KeychainStore`
+/// makes every Security call on one queue for the process (Cairn 0.4.1, cairn#237), so a read
+/// here never races the app's `forgetSecret`.
 final class ThrowawayKeychain: SecretStore, @unchecked Sendable {
     let keychain = KeychainStore(service: "cairn.sky-selftest-" + UUID().uuidString)
     private let lock = NSLock()
-    private let calls = NSLock()
     private var written: Set<String> = []
 
-    func read(_ account: String) -> Result<String?, ReplyError> { calls.withLock { keychain.read(account) } }
+    func read(_ account: String) -> Result<String?, ReplyError> { keychain.read(account) }
     func write(_ account: String, _ value: String) -> Result<Void, ReplyError> {
         lock.withLock { _ = written.insert(account) }
-        return calls.withLock { keychain.write(account, value) }
+        return keychain.write(account, value)
     }
-    func delete(_ account: String) -> Result<Void, ReplyError> { calls.withLock { keychain.delete(account) } }
+    func delete(_ account: String) -> Result<Void, ReplyError> { keychain.delete(account) }
 
     var accounts: Set<String> { lock.withLock { written } }
     /// The items this run wrote that are still there.
