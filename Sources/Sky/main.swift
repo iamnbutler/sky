@@ -17,7 +17,7 @@ let app = LeanApp(
     frame: { cairn_app_frame($0) },
     codec: FrameV1Codec())
 
-let size = Size(w: 460, h: 560)
+let size = Size(w: 600, h: 820)
 
 if let i = CommandLine.arguments.firstIndex(of: "--selftest") {
     let args = CommandLine.arguments

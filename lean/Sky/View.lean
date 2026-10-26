@@ -1,14 +1,19 @@
 module
 
-public import Sky.Secrets
+public import Sky.Rows
+public import Cairn.VList
 
 /-! # The window
 
 Signed out, the sign-in screen: handle or email, the app password (a secure field, bullets
 only), a link to Bluesky's app-passwords page, the service, Sign In (a control only while it is
 enabled; otherwise drawn greyed, with no control), what is happening ("Signing in…") with a
-Cancel once it has taken a few seconds, and what went wrong, in words. Signed in: who, Sign Out, Load more and Refresh while
-enabled, and the first posts of the feed, one line each (#211 adds the real feed). -/
+Cancel once it has taken a few seconds, and what went wrong, in words. Signed in: the home feed
+(Following) in a virtual list: each post with its avatar, name, handle and time, its text
+wrapped, up to four images (loaded as their rows come into view), "Reposted by" and "Replying
+to", other embeds as one line and the counts; the end row loads more as it comes into view.
+Refresh and Account in the header; new posts put above the reader are offered as "N new
+posts". -/
 
 @[expose] public section
 
@@ -26,11 +31,9 @@ def alert : Color := ⟨190, 40, 40, 255⟩
 
 def pad : Nat := 16
 def lineH : Nat := 18
-/-- How many posts the window lists. -/
-def shown : Nat := 12
 
-/-- Room for the sign-in screen and for the feed's rows. -/
-def minSize (_ : State) : Size := ⟨440, 520⟩
+/-- Room for the sign-in screen, and for a post with a full-width image (360 points) beside its avatar. -/
+def minSize (_ : State) : Size := ⟨520, 600⟩
 
 def textLine (t : String) (color : Color := ink) (size : Nat := 13) (weight : Nat := 400) : Node :=
   .box { width := .fill, height := .fixed lineH, clip := true, axis := .row, align := .center } none
@@ -106,8 +109,195 @@ def signInView (s : State) (ui : UI) : List Node :=
        (if offerCancel s then [button ui 12 "Cancel" 80] else [])) ] ++
   problemLine s
 
-def itemLine (i : FeedItem) : Node :=
-  textLine ("@" ++ i.post.author.handle ++ ": " ++ i.post.text)
+/-! ## Times -/
+
+def monthNames : Array String :=
+  #["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+/-- The year, month (1 to 12) and day of the date `z` days after 1970-01-01 (the proleptic
+Gregorian calendar; Howard Hinnant's `civil_from_days`). -/
+def civilFromDays (z : Int) : Int × Nat × Nat :=
+  let z := z + 719468
+  let era := z / 146097
+  let doe := z - era * 146097
+  let yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp := (5 * doy + 2) / 153
+  let d := doy - (153 * mp + 2) / 5 + 1
+  let m := if mp < 10 then mp + 3 else mp - 9
+  (yoe + era * 400 + (if m ≤ 2 then 1 else 0), m.toNat, d.toNat)
+
+def msPerDay : Int := 86400000
+
+/-- When a post was written, as the feed says it: "now", "3m", "2h", then the day ("Oct 12"),
+with the year if it isn't this year's. Local dates, from the runtime's clock. -/
+def relTime (now : Time) (createdAt : String) : String :=
+  match parseDatetime createdAt with
+  | none => ""
+  | some t =>
+    let d := now.wall - t
+    if d < 60000 then "now"
+    else if d < 3600000 then s!"{d / 60000}m"
+    else if d < msPerDay then s!"{d / 3600000}h"
+    else
+      let (y, m, day) := civilFromDays ((t + now.zone * 1000) / msPerDay)
+      let (ny, _, _) := civilFromDays ((now.wall + now.zone * 1000) / msPerDay)
+      let md := s!"{monthNames[m - 1]?.getD "?"} {day}"
+      if y = ny then md else s!"{md}, {y}"
+
+/-! ## The feed -/
+
+/-- The list's ref: a new generation is a new list, at the top. -/
+def listRef (s : State) : ControlRef := ⟨14, s.gen⟩
+
+def feedList (s : State) : VList :=
+  { ref := listRef s, style := { width := .fill, height := .fill, background := some white,
+                                  radius := 8, clip := true } }
+
+def avatarSize : Nat := 40
+/-- The widest an image is drawn, and the tallest. -/
+def imageW : Nat := 360
+def imageMaxH : Nat := 400
+def tileW : Nat := 178
+def tileH : Nat := 132
+
+def displayName (p : Profile) : String :=
+  match p.displayName with
+  | some n => if n.trimAscii.isEmpty then p.handle else n
+  | none => p.handle
+
+def avatar (s : State) (p : Profile) : Node :=
+  match p.avatar with
+  | some src =>
+    .box { width := .fixed avatarSize, height := .fixed avatarSize, radius := avatarSize / 2,
+           clip := true } none
+      [Node.image { source := src, width := avatarSize, height := avatarSize,
+                    state := s.images.state src }]
+  | none =>
+    .box { width := .fixed avatarSize, height := .fixed avatarSize, radius := avatarSize / 2,
+           align := .center, justify := .center, background := some line } none
+      [.text { font := { size := 16, weight := 600 }, color := white }
+        ((displayName p).take 1).toString.toUpper]
+
+/-- One image, its height from its aspect ratio (so nothing moves when it loads), capped. -/
+def imageHeight (i : CairnAtproto.Image) : Nat :=
+  match i.aspect with
+  | some (w, h) => if w = 0 then 240 else max 80 (min imageMaxH (imageW * h / w))
+  | none => 240
+
+def thumb (s : State) (i : CairnAtproto.Image) (w h : Nat) : Node :=
+  .box { width := .fixed w, height := .fixed h, radius := 6, clip := true } none
+    [Node.image { source := i.thumb, width := w, height := h, state := s.images.state i.thumb }]
+
+/-- The thumbnails: one at its aspect, or two to four in a grid of two columns. -/
+def images (s : State) : List CairnAtproto.Image → List Node
+  | [] => []
+  | [i] => [thumb s i imageW (imageHeight i)]
+  | is =>
+    [.box { gap := 4 } none
+      ((List.range ((is.length + 1) / 2)).map fun r =>
+        .box { axis := .row, gap := 4 } none
+          ((is.drop (2 * r)).take 2 |>.map fun i => thumb s i tileW tileH))]
+
+def domainOf (uri : String) : String :=
+  let rest := match uri.splitOn "://" with
+    | [_, r] => r
+    | _ => uri
+  ((rest.splitOn "/").head?.getD rest)
+
+def quoteLine : Quote → String
+  | .post q => "Quoted post · @" ++ q.author.handle ++ (if q.text.isEmpty then "" else ": " ++ q.text)
+  | .notFound _ => "Quoted post (deleted)"
+  | .blocked _ => "Quoted post (blocked)"
+  | .detached _ => "Quoted post (removed)"
+  | .other _ => "Quoted feed or list"
+
+def mediaLine : Media → Option String
+  | .images _ => none
+  | .external e => some ((if e.title.isEmpty then e.uri else e.title) ++ " · " ++ domainOf e.uri)
+  | .other t => some (if (t.splitOn "video").length > 1 then "Video" else "Embedded content")
+
+/-- Other embeds, one line each: a link's title and domain, a quoted post, a video. -/
+def embedLines : Option Embed → List String
+  | some (.external e) => [(if e.title.isEmpty then e.uri else e.title) ++ " · " ++ domainOf e.uri]
+  | some (.record q) => [quoteLine q]
+  | some (.recordWithMedia q m) => (mediaLine m).toList ++ [quoteLine q]
+  | some (.other t) => [if (t.splitOn "video").length > 1 then "Video" else "Embedded content"]
+  | _ => []
+
+def embedLine (t : String) : Node :=
+  .box { width := .fill, height := .fixed 28, padding := ⟨0, 10, 0, 10⟩, align := .start,
+         justify := .center, radius := 6, border := some ⟨1, line⟩, clip := true } none
+    [.text { font := { size := 12 }, color := muted } t]
+
+/-- "Reposted by" and "Replying to". -/
+def contextLines (it : FeedItem) : List Node :=
+  (match it.reason with
+   | some (.repost b _) => [textLine ("Reposted by " ++ displayName b) muted 12 600]
+   | _ => []) ++
+  (match it.reply with
+   | some r => match r.parent with
+     | .post p => [textLine ("Replying to @" ++ p.author.handle) muted 12]
+     | _ => [textLine "Replying to a post" muted 12]
+   | none => [])
+
+def plural (n : Nat) (one many : String) : String := s!"{n} " ++ (if n = 1 then one else many)
+
+def countsLine (p : Post) : String :=
+  plural p.replyCount "reply" "replies" ++ " · " ++ plural p.repostCount "repost" "reposts" ++
+    " · " ++ plural p.likeCount "like" "likes"
+
+/-- A post: the avatar, then who and when, the text, the images, other embeds and the counts.
+The whole row opens the post (^32); it tells Sky when it comes into view, to load its images. -/
+def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
+  let p := it.post
+  let r : ControlRef := ⟨32, k⟩
+  .box { width := .fill, background := some (if ui.hover = some r then ⟨248, 248, 250, 255⟩ else white),
+         border := ring ui r } (some { ref := r, role := .listItem, appear := true,
+                                       label := "Post by @" ++ p.author.handle })
+    [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 12, 14⟩, gap := 10 } none
+        [ avatar s p.author,
+          .box { width := .fill, gap := 5 } none
+            (contextLines it ++
+             [ .box { axis := .row, width := .fill, height := .fixed lineH, gap := 6, align := .center,
+                      clip := true } none
+                 [ .text { font := { size := 14, weight := 600 }, color := ink } (displayName p.author),
+                   .text { font := { size := 13 }, color := muted } ("@" ++ p.author.handle),
+                   .text { font := { size := 13 }, color := muted } ("· " ++ relTime s.now p.createdAt) ] ] ++
+             (if p.text.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} p.text]) ++
+             images s (thumbsOf p.embed) ++
+             (embedLines p.embed).map embedLine ++
+             [textLine (countsLine p) muted 12]) ] ,
+      .box { width := .fill, height := .fixed 1, background := some line } none [] ]
+
+def endH : Nat := 64
+
+/-- The end of the list: loading more as it comes into view (^30), a failed load with Retry
+(^31), or the end of the timeline. -/
+def endRow (s : State) (ui : UI) : Node :=
+  let base : Style := { width := .fill, height := .fixed endH, align := .center, justify := .center,
+                        gap := 10, axis := .row }
+  if canLoadMore s && !s.moreFailed then
+    .box base (some { ref := ⟨30, 0⟩, role := .text, label := "Loading more posts", appear := true })
+      [.text { font := { size := 13 }, color := muted } "Loading…"]
+  else if canLoadMore s && s.moreFailed then
+    .box base none
+      [.text { font := { size := 13 }, color := alert } "Couldn't load more.",
+       button ui 31 "Retry" 80]
+  else
+    .box base none
+      [.text { font := { size := 13 }, color := muted }
+        (if s.feed.loadMore.isSome || (s.feed.items.isEmpty && s.feed.refresh.isSome) then "Loading…"
+         else if s.feed.atEnd then "You're all caught up."
+         else if s.feed.items.isEmpty then "No posts yet."
+         else "")]
+
+/-- The row with key `k`: the end row for `0`. -/
+def rowOf (s : State) (ui : UI) (k : Nat) : Node :=
+  if k = 0 then endRow s ui
+  else match s.rows.item? k with
+    | some it => postRow s ui k it
+    | none => .box { width := .fill, height := .fixed 1 } none []
 
 def feedLine (f : Feed) : String :=
   s!"{f.items.length} posts" ++ (if f.atEnd then " · the end" else "") ++
@@ -129,21 +319,37 @@ def accountPanel (s : State) (ui : UI) : List Node :=
           button ui 11 "Sign out" 84 ] ]
   else []
 
-/-- Signed in: who (the account button), the account panel, the feed's buttons and its first
-posts. -/
+/-- The new posts above the reader, when there are any (^33). -/
+def newPosts (s : State) (ui : UI) : List Node :=
+  if canShowNew s then
+    [ .box { height := .fixed 24, padding := ⟨0, 12, 0, 12⟩, radius := 12, align := .center,
+             justify := .center, background := some accent, corner := .continuous,
+             border := ring ui ⟨33, 0⟩ } (some { ref := ⟨33, 0⟩, label := newPostsLabel s.fresh })
+        [.text { font := { size := 12, weight := 600 }, color := white } ("↑ " ++ newPostsLabel s.fresh)] ]
+  else []
+
+/-- One line under the header, always there so the list never moves: the new posts, and what
+the feed is doing or what went wrong. -/
+def statusRow (s : State) (ui : UI) : Node :=
+  .box { axis := .row, width := .fill, height := .fixed 24, gap := 8, align := .center } none
+    (newPosts s ui ++
+     [ .box { width := .fill, height := .fixed lineH, clip := true } none
+        [match s.problem with
+         | some p => .text { font := { size := 12 }, color := alert } p
+         | none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ])
+
+/-- Signed in: the header (who, Refresh, Account), the account panel, the status line and the
+feed's virtual list. -/
 def feedView (s : State) (ui : UI) : List Node :=
   [ .box { axis := .row, width := .fill, height := .fixed 30, gap := 8, align := .center } none
-      [ .box { width := .fill, height := .fixed lineH, clip := true } none
-          [.text { font := { size := 15, weight := 600 }, color := ink } (who s)],
+      [ .text { font := { size := 17, weight := 700 }, color := ink } "Following",
+        .box { width := .fill, height := .fixed lineH, clip := true } none
+          [.text { font := { size := 12 }, color := muted } (who s)],
+        (if canRefresh s then button ui 4 "Refresh" 84 else greyButton "Refresh" 84),
         button ui 13 (if s.accountOpen then "Done" else "Account") 84 ] ] ++
   accountPanel s ui ++
-  [
-    .box { axis := .row, width := .fill, height := .fixed 30, gap := 8 } none
-      ((if canLoadMore s then [button ui 3 "Load more"] else []) ++
-       (if canRefresh s then [button ui 4 "Refresh"] else [])),
-    textLine (feedLine s.feed) muted ] ++
-  problemLine s ++
-  (s.feed.items.take shown).map itemLine
+  [ statusRow s ui,
+    VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
 
 def view (s : State) (ui : UI) : Node :=
   .box { width := .fill, height := .fill, padding := ⟨pad, pad, pad, pad⟩, gap := 7,

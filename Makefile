@@ -6,7 +6,7 @@ export RESERVOIR_API_URL := https://cairn.registry.nexthub.sh/api/v1
 CAIRN_PKG = lean/.lake/packages/cairn
 CAIRN = $(CAIRN_PKG)/tools/cairn/.build/release/cairn
 
-.PHONY: deps cairn-tool build selftest lean lint audit ledger ledger-update kernel fuzz size claims check clean
+.PHONY: deps cairn-tool build app selftest lean lint audit ledger ledger-update kernel fuzz size claims check clean
 
 # Fetch Cairn, cairn_json and cairn_atproto as lean/lake-manifest.json pins them.
 deps:
@@ -19,6 +19,17 @@ cairn-tool: deps
 # lake build, cairn-link into .cairn/lib/libsky.a, swift build.
 build: cairn-tool
 	$(CAIRN) build
+
+# Sky.app, built for release by `cairn bundle` (bundle/Info.plist; bundle/entitlements.plist is
+# empty and only turns on the hardened runtime), signed and installed in ~/Applications. SIGN is
+# a codesign identity: the first "Developer ID Application" one in the keychain, else `-`.
+SIGN ?= $(or $(shell security find-identity -v -p codesigning 2>/dev/null | grep -m1 '"Developer ID Application' | sed -E 's/.*"(.*)"/\1/'),-)
+app: build
+	$(CAIRN) bundle --product Sky --sign "$(SIGN)"
+	rm -rf $(HOME)/Applications/Sky.app
+	mkdir -p $(HOME)/Applications
+	ditto build/apps/Sky.app $(HOME)/Applications/Sky.app
+	@echo "sky: installed ~/Applications/Sky.app, signed $(if $(filter -,$(SIGN)),ad hoc (no Developer ID identity),by $(SIGN))"
 
 # The headless check runs with a home of its own (build/home), so it never reads a saved service
 # or touches the network.

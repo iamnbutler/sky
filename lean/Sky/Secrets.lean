@@ -50,14 +50,40 @@ theorem settle_snd (s : State) :
       else cancelEffects (Session.step s.session (.cancel (pids s.session))).2 := by
   unfold settle; split <;> rfl
 
+theorem settle_pw (t : State) (p : Text.SecureField) :
+    (settle { t with password := p }).1 = { (settle t).1 with password := p } := by
+  unfold settle; split <;> rfl
+
+/-- `tidy`'s effects never read the password. -/
+theorem tidy_snd_pw (t : State) (p : Text.SecureField) :
+    (tidy { t with password := p }).2 = (tidy t).2 := by
+  simp only [tidy, restart]
+  split <;> (try split) <;> (try split) <;> rfl
+
+theorem settle_snd_pw (t : State) (p : Text.SecureField) :
+    (settle { t with password := p }).2 = (settle t).2 := by
+  rw [settle_snd, settle_snd]
+
+theorem tidy_settle_pw (t : State) (p : Text.SecureField) :
+    (tidy (settle { t with password := p }).1).2 = (tidy (settle t).1).2 := by
+  rw [settle_pw, tidy_snd_pw]
+
+theorem step1_editPassword_snd (s : State) (op : TextOp) :
+    (step1 s (.editPassword op)).2 =
+      (Text.SecureField.apply op s.password).2 ++ (settle s).2 ++ (tidy (settle s).1).2 := by
+  show (Text.SecureField.apply op s.password).2 ++
+      (settle { s with password := (Text.SecureField.apply op s.password).1 }).2 ++
+      (tidy (settle { s with password := (Text.SecureField.apply op s.password).1 }).1).2 = _
+  rw [settle_snd, settle_snd, settle_pw, tidy_snd_pw]
+
 theorem step_blind_effects (s : State) (c : Cmd) (p : Text.SecureField) (hc : c ≠ .signIn) :
     (s.step c).2 = ({ s with password := p }.step c).2 := by
   cases c with
   | signIn => exact absurd rfl hc
   | editPassword op =>
-    show (Text.SecureField.apply op s.password).2 ++ (settle _).2 =
-      (Text.SecureField.apply op p).2 ++ (settle _).2
-    rw [secure_apply_snd op s.password p, settle_snd, settle_snd]
+    show (step1 s (.editPassword op)).2 = (step1 { s with password := p } (.editPassword op)).2
+    rw [step1_editPassword_snd, step1_editPassword_snd, settle_snd_pw s p, tidy_settle_pw s p,
+      secure_apply_snd op s.password]
   | _ => rfl
 
 theorem cancelEffects_reqs (outs : List Out) : (cancelEffects outs).filterMap reqOf = [] := by
@@ -73,22 +99,46 @@ theorem settle_reqs (s : State) : (settle s).2.filterMap reqOf = [] := by
   · rfl
   · exact cancelEffects_reqs _
 
+theorem cancels_reqs (ids : List Nat) :
+    (ids.map Effect.cancelRequest).filterMap reqOf = [] := by
+  induction ids with
+  | nil => rfl
+  | cons _ _ ih => exact ih
+
+/-- `tidy` only cancels. -/
+theorem tidy_snd (s : State) : ∃ ids : List Nat, (tidy s).2 = ids.map Effect.cancelRequest := by
+  unfold tidy restart
+  split
+  · split
+    · exact ⟨[], rfl⟩
+    · split
+      · exact ⟨[], rfl⟩
+      · exact ⟨_, (List.map_map ..).symm⟩
+    · split
+      · exact ⟨_, (List.map_map ..).symm⟩
+      · exact ⟨[], rfl⟩
+    · exact ⟨_, (List.map_map ..).symm⟩
+  · exact ⟨_, (List.map_map ..).symm⟩
+
+theorem tidy_reqs (s : State) : (tidy s).2.filterMap reqOf = [] := by
+  obtain ⟨ids, e⟩ := tidy_snd s; rw [e]; exact cancels_reqs ids
+
+/-- The state Sign In leaves, before `settle`. -/
+def signedInTo (s : State) : State :=
+  { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
+           problem := none, accountOpen := false, slow := false,
+           session := { s.session with phase := .signingIn s.session.next (serviceOf s),
+                                       next := s.session.next + 1 } }
+
 /-- Sign In, enabled: the step it is. -/
 theorem signIn_run {s : State} (h : ready s = true) :
     step1 s .signIn =
-      ((settle { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
-                        problem := none, accountOpen := false, slow := false,
-                        session := { s.session with phase := .signingIn s.session.next (serviceOf s),
-                                                    next := s.session.next + 1 } }).1,
+      ((tidy (settle (signedInTo s)).1).1,
        [.request (sessionId s.session.next)
           (createSession (serviceOf s) (identifierOf s) s.password.text),
-        .setTimer slowTimer slowMs] ++
-       (settle { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
-                        problem := none, accountOpen := false, slow := false,
-                        session := { s.session with phase := .signingIn s.session.next (serviceOf s),
-                                                    next := s.session.next + 1 } }).2) := by
+        .setTimer slowTimer slowMs] ++ (settle (signedInTo s)).2 ++ (tidy (settle (signedInTo s)).1).2) := by
   have hc : canSignIn s.session = true := by simp only [ready, Bool.and_eq_true] at h; exact h.2
-  simp only [step1, step0, signIn, h, ↓reduceIte, driveSession, drive, signIn_step hc]
+  simp only [step1, step0, signIn, h, ↓reduceIte, driveSession, drive, signIn_step hc, signedInTo]
   simp [signedInEvent, handleOuts, handleOut]
 
 theorem ready_agree {s : State} {p : Text.SecureField} (h : s.password.Agree p) :
@@ -112,7 +162,7 @@ theorem signIn_scrub (s : State) (p : Text.SecureField) (hp : s.password.Agree p
       rw [ready_agree hp]; simpa using hr
     simp only [Bool.not_eq_true] at hr
     simp only [step1, step0, signIn, hr, hr', Bool.false_eq_true, ↓reduceIte]
-    rw [settle_snd, settle_snd]
+    rw [settle_snd_pw s p, tidy_settle_pw s p]
 
 /-- Sign In, enabled: its only request is `createSession` with the password, and the field is
 empty after. -/
@@ -122,7 +172,7 @@ theorem signIn_requests {s : State} (h : ready s = true) :
     (s.step .signIn).1.password = Text.SecureField.empty passwordHint := by
   refine ⟨?_, (signIn_post h).1⟩
   show (step1 s .signIn).2.filterMap reqOf = _
-  rw [signIn_run h, List.filterMap_append, settle_reqs]
+  rw [signIn_run h, List.filterMap_append, List.filterMap_append, settle_reqs, tidy_reqs]
   rfl
 
 /-- ^26: the password reaches one request. -/
@@ -160,6 +210,43 @@ theorem cancelEffects_noSecret (outs : List Out) : NoSecret (cancelEffects outs)
   obtain ⟨o, -, ho⟩ := he
   cases o <;> simp_all [effSecret]
   subst ho; rfl
+
+theorem cancels_noSecret (ids : List Nat) : NoSecret (ids.map Effect.cancelRequest) := by
+  intro e he
+  obtain ⟨_, -, rfl⟩ := List.mem_map.1 he
+  rfl
+
+theorem tidy_noSecret (s : State) : NoSecret (tidy s).2 := by
+  obtain ⟨ids, e⟩ := tidy_snd s; rw [e]; exact cancels_noSecret ids
+
+theorem cancelWhere_noSecret (t : Images) (p : String → Bool) : NoSecret (t.cancelWhere p).2 := by
+  intro e he
+  simp only [Images.cancelWhere, List.mem_map] at he
+  obtain ⟨_, -, rfl⟩ := he
+  rfl
+
+theorem evicted_noSecret (t : Images) (src : String) : NoSecret (t.evicted src).2 := by
+  intro e he
+  simp only [Images.evicted, Images.cancel, List.mem_map] at he
+  obtain ⟨_, -, rfl⟩ := he
+  rfl
+
+theorem loadSources_noSecret : ∀ (s : State) (srcs : List String), NoSecret (loadSources s srcs).2
+  | _, [] => noSecret_nil
+  | s, src :: rest => by
+    simp only [loadSources]
+    split
+    · intro e he
+      rcases List.mem_cons.1 he with rfl | he
+      · rfl
+      · exact loadSources_noSecret _ rest e he
+    · exact loadSources_noSecret s rest
+
+theorem appearRow_noSecret (s : State) (k : Nat) : NoSecret (appearRow s k).2 := by
+  unfold appearRow
+  split
+  · exact noSecret_nil
+  · exact noSecret_append (cancelWhere_noSecret _ _) (loadSources_noSecret _ _)
 
 theorem settle_noSecret (s : State) : NoSecret (settle s).2 := by
   rw [settle_snd]; split
@@ -301,6 +388,13 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
   | nextField => intro e he; simp only [step0, List.mem_singleton] at he; subst he; rfl
   | toggleAccount => exact noSecret_nil
   | openHelp => exact sendOwn_noSecret _ _ _ rfl
+  | appearRow k => exact appearRow_noSecret s k
+  | openPost k =>
+    simp only [step0, Sky.openPost]
+    split
+    · exact sendOwn_noSecret _ _ _ rfl
+    · exact noSecret_nil
+  | showNew => exact noSecret_nil
   | msg m =>
     simp only [step0]
     cases m with
@@ -317,10 +411,11 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
         | _ => exact noSecret_nil
       · split
         · exact driveSession_noSecret _ _ h
-        · exact noSecret_nil
+        · split <;> exact noSecret_nil
     | timer n =>
       simp only [receive0]
       split <;> exact noSecret_nil
+    | sub sb e => cases e <;> first | exact noSecret_nil | exact evicted_noSecret _ _
     | _ => exact noSecret_nil
 
 /-- While signed out, no step sends a request carrying a Keychain secret. -/
@@ -330,8 +425,9 @@ def SignedOutNoSecret : Prop :=
 theorem signedOutNoSecret : SignedOutNoSecret := by
   intro s c h
   rcases step_cases s c with e | e <;> rw [e]
-  · exact noSecret_append (step0_noSecret s c h) (settle_noSecret _)
-  · exact noSecret_append (step0_noSecret s.blank c h) (settle_noSecret _)
+  · exact noSecret_append (noSecret_append (step0_noSecret s c h) (settle_noSecret _)) (tidy_noSecret _)
+  · exact noSecret_append (noSecret_append (step0_noSecret s.blank c h) (settle_noSecret _))
+      (tidy_noSecret _)
 
 /-! ## Sign Out forgets both items -/
 
@@ -382,6 +478,7 @@ theorem signOutForgets : SignOutForgets := by
     show _ ∈ (step1 s.blank .signOut).2
     obtain ⟨u, hu⟩ := driveSession_keeps t .signOut
     simp only [step1, step0, signOut]
+    apply List.mem_append_left
     apply List.mem_append_left
     apply List.mem_append_left
     show _ ∈ (driveSession t .signOut).2
