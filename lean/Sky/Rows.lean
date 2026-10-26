@@ -19,8 +19,8 @@ open Cairn CairnAtproto CairnAtproto.Session
 
 /-! ## The rows are untouched until `tidy` -/
 
-theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows := by
-  unfold onAnswer
+theorem onAnswer0_rows (s : State) (id : Nat) (a : Answer) : (onAnswer0 s id a).1.rows = s.rows := by
+  unfold onAnswer0
   generalize readPage a = pr
   obtain ⟨page, prob⟩ := pr
   dsimp only
@@ -32,6 +32,9 @@ theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.
         split <;> rfl
       · rfl
   · split <;> rfl
+
+theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows :=
+  onAnswer0_rows s id a
 
 theorem sendOwn_rows (s : State) (k : Own) (r : Request) : (sendOwn s k r).1.rows = s.rows := rfl
 
@@ -86,6 +89,13 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
   | openPost k =>
     simp only [step0, Sky.openPost]
     split <;> rfl
+  | act kind k =>
+    simp only [step0, actPress]
+    split
+    · split
+      · split <;> rfl
+      · rfl
+    · rfl
   | msg m =>
     simp only [step0]
     cases m with
@@ -166,7 +176,7 @@ theorem tidy_follows (t : State) (hw : t.rows.WF) (hd : live t.session = false �
 theorem step1_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (step1 s c).1 := by
   rw [step1_fst]
   apply tidy_follows
-  · rw [settle_rows, step0_rows]; exact h
+  · rw [settle_rows, (flushIf_flushed _ _).rows, step0_rows]; exact h
   · exact settle_dead _
 
 theorem step_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (s.step c).1 := by
@@ -299,8 +309,8 @@ theorem imagesNear : ImagesNear := by
   · have hp' : p ∈ (step1 s.blank (.appearRow k)).1.images.pending := hp
     rw [step1_fst] at hp'
     have := tidy_pending _ p hp'
-    rw [settle_images] at this
-    exact appearRow_pending s.blank k i hi p this
+    rw [settle_images, (flushIf_flushed _ _).images] at this
+    exact appearRow_pending (clearOut s.blank) k i hi p this
   · rcases step_cases s c with e | e <;> rw [e] at h ⊢
     · exact step1_dead s c h
     · exact step1_dead s.blank c h
@@ -334,8 +344,9 @@ theorem tidy_gen (t : State) : t.gen ≤ (tidy t).1.gen := by
 theorem showNew_post {s : State} (h : live s.session = true) :
     s.gen < (s.step .showNew).1.gen ∧ (s.step .showNew).1.feed = s.feed := by
   show s.gen < (step1 s.blank .showNew).1.gen ∧ (step1 s.blank .showNew).1.feed = s.feed
-  rw [step1_fst, settle_live (s := (step0 s.blank .showNew).1) h]
-  exact ⟨Nat.lt_of_lt_of_le (Nat.lt_succ_self s.gen) (tidy_gen (step0 s.blank .showNew).1),
+  rw [step1_fst, flushIf_nil (s := (step0 (clearOut s.blank) .showNew).1) rfl,
+    settle_live (s := (step0 (clearOut s.blank) .showNew).1) h]
+  exact ⟨Nat.lt_of_lt_of_le (Nat.lt_succ_self s.gen) (tidy_gen (step0 (clearOut s.blank) .showNew).1),
     (tidy_core _).feed⟩
 
 theorem openPost_core (s : State) (k : Nat) :
@@ -346,14 +357,19 @@ theorem openPost_core (s : State) (k : Nat) :
 /-- Opening a post, or a row coming into view, while signed in: the feed and the session stay. -/
 theorem openPost_post {s : State} (h : live s.session = true) (k : Nat) :
     (s.step (.openPost k)).1.feed = s.feed ∧ (s.step (.openPost k)).1.session = s.session := by
-  have c := (openPost_core s.blank k)
-  have l := step1_live (s := s.blank) (c := .openPost k) (by rw [c.1]; exact h)
+  have c := (openPost_core (clearOut s.blank) k)
+  have ho : (step0 (clearOut s.blank) (.openPost k)).1.acts.outbox = [] := by
+    simp only [step0, Sky.openPost]; split <;> rfl
+  have l := step1_live (s := s.blank) (c := .openPost k) (by rw [c.1]; exact h) ho
   exact ⟨l.feed.trans c.2, l.session.trans c.1⟩
 
 theorem appearRow_post {s : State} (h : live s.session = true) (k : Nat) :
     (s.step (.appearRow k)).1.feed = s.feed ∧ (s.step (.appearRow k)).1.session = s.session := by
-  have c := appearRow_core s.blank k
-  have l := step1_live (s := s.blank) (c := .appearRow k) (by show live (appearRow s.blank k).1.session = true; rw [c.1]; exact h)
+  have c := appearRow_core (clearOut s.blank) k
+  have ho : (step0 (clearOut s.blank) (.appearRow k)).1.acts.outbox = [] :=
+    congrArg Acts.outbox (appearRow_acts (clearOut s.blank) k)
+  have l := step1_live (s := s.blank) (c := .appearRow k)
+    (by show live (appearRow (clearOut s.blank) k).1.session = true; rw [c.1]; exact h) ho
   exact ⟨l.feed.trans c.2.1, l.session.trans c.1⟩
 
 end Sky

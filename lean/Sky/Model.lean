@@ -1,6 +1,7 @@
 module
 
 public import Sky.Feed
+public import Sky.Acts
 public import Sky.SessionFacts
 public import Cairn.Text.Field
 public import Cairn.UI.Images
@@ -178,7 +179,9 @@ structure State where
   images : Images := {}
   /-- The runtime's clock, for "3m" and "Oct 12". -/
   now : Time := {}
-deriving Repr, DecidableEq, Inhabited
+  /-- Likes, reposts, follows and mutes (`Sky.Acts`, cairn#252). -/
+  acts : Acts := {}
+deriving Repr, Inhabited
 
 /-! ## Reading the state -/
 
@@ -316,8 +319,8 @@ for a refresh, dropped. -/
 def withdraw (ss : Session.State) (id : Nat) : Session.State × List Effect :=
   ((Session.step ss (.cancel [id])).1, cancelEffects (Session.step ss (.cancel [id])).2)
 
-/-- The answer to call `id`. -/
-def onAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
+/-- The answer to call `id`, for the feed. -/
+def onAnswer0 (s : State) (id : Nat) (a : Answer) : State × List Effect :=
   let (page, prob) := readPage a
   match s.feed.loadMore with
   | some (l, _) =>
@@ -337,6 +340,30 @@ def onAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
       ({ s with feed := s.feed.gotRefresh id page,
                 problem := prob.map ("Couldn't refresh: " ++ ·) }, [])
     else (s, [])
+
+/-- Where an act goes and when: the account's DID and the clock. -/
+def ctxOf (s : State) : Ctx :=
+  { did := ((account s.session).map (·.did)).getD "", nowMs := s.now.wall.toNat }
+
+/-- Whether call `id` is the feed's (the load-more or the refresh in flight). -/
+def feedCall (f : Feed) (id : Nat) : Bool :=
+  (match f.loadMore with
+   | some (l, _) => l == id
+   | none => false) || f.refresh == some id
+
+/-- The acts after the answer to call `id`: an act's call goes to its table; a page of the feed
+is seen by the tables (the viewer's like, repost, follow and mute of everything in it). -/
+def actsAnswer (s : State) (id : Nat) (a : Answer) : Acts :=
+  if s.acts.reqs.contains id then s.acts.answer (ctxOf s) id a
+  else if feedCall s.feed id then
+    match (readPage a).1 with
+    | some p => Acts.seePage (ctxOf s) id s.acts p.items
+    | none => s.acts
+  else s.acts
+
+/-- The answer to call `id`: the feed's, then the acts'. -/
+def onAnswer (s : State) (id : Nat) (a : Answer) : State × List Effect :=
+  ({ (onAnswer0 s id a).1 with acts := actsAnswer s id a }, (onAnswer0 s id a).2)
 
 def onEvent (s : State) : Session.Event → State × List Effect
   | .signInFailed r => ({ s with problem := some (signInWords r) }, [])
@@ -510,16 +537,18 @@ def receive0 (s : State) : Msg → State × List Effect
         driveSession { s with forgetting := s.forgetting.filter (· != id) } (.reply (id / 2) r)
       else if s.images.waiting id then ({ s with images := s.images.receive id r }, [])
       else (s, [])
-  | .timer n => if n = slowTimer then ({ s with slow := true }, []) else (s, [])
+  | .timer n => if n = slowTimer then ({ s with slow := true }, [])
+    else ({ s with acts := s.acts.timer (ctxOf s) n }, [])
   | .clock t => ({ s with now := t }, [])
   | .sub _ (.evicted src) => ({ s with images := (s.images.evicted src).1 }, (s.images.evicted src).2)
   | _ => (s, [])
 
-/-- Signed out (no live session): the feed is emptied and every call the session has taken on
-cancelled (the session's `Input.cancel`). -/
+/-- Signed out (no live session): the feed and the acts are emptied and every call the session
+has taken on cancelled (the session's `Input.cancel`), the acts' with the rest. -/
 def settle (s : State) : State × List Effect :=
   if live s.session then (s, [])
-  else ({ s with feed := {}, session := (Session.step s.session (.cancel (pids s.session))).1 },
+  else ({ s with feed := {}, session := (Session.step s.session (.cancel (pids s.session))).1,
+                 acts := {} },
         cancelEffects (Session.step s.session (.cancel (pids s.session))).2)
 
 /-- The rows anew, for a feed replaced or emptied: a new list, at the top; every image load
@@ -550,6 +579,54 @@ def tidy (s : State) : State × List Effect :=
     ({ s with rows := {}, fresh := 0, moreFailed := false, images := {} },
      s.images.pending.map fun p => .cancelRequest p.1)
 
+/-! ## Acts -/
+
+/-- A feed item is hidden while its author, or the account that reposted it, shows muted. -/
+def hiddenItem (s : State) (it : FeedItem) : Bool :=
+  s.acts.muted it.post.author.did ||
+    (match it.reason with
+     | some (.repost b _) => s.acts.muted b.did
+     | _ => false)
+
+/-- The account Mute acts on from a row: the post's author; on a hidden row, the account that
+hides it (the author if muted, else the reposter), which it unmutes. -/
+def muteTarget (s : State) (it : FeedItem) : String :=
+  if s.acts.muted it.post.author.did then it.post.author.did
+  else match it.reason with
+    | some (.repost b _) => if s.acts.muted b.did then b.did else it.post.author.did
+    | _ => it.post.author.did
+
+/-- Whether `kind` can be pressed on the row with key `k`: signed in, a post's row; like, repost
+and follow on a row that shows (follow and mute not on the account's own posts); mute on any. -/
+def canAct (s : State) (kind : Kind) (k : Nat) : Bool :=
+  live s.session &&
+    match s.rows.item? k with
+    | none => false
+    | some it =>
+      match kind with
+      | .like | .repost => !hiddenItem s it
+      | .follow => !hiddenItem s it && it.post.author.did != (ctxOf s).did
+      | .mute => muteTarget s it != (ctxOf s).did
+
+/-- The key `kind` acts on, from the row's item. -/
+def actKey (s : State) (kind : Kind) (it : FeedItem) : String :=
+  match kind with
+  | .like | .repost => it.post.uri
+  | .follow => it.post.author.did
+  | .mute => muteTarget s it
+
+/-- Press `kind` on the row with key `k`: the table shows the toggled value at once and queues
+its write. -/
+def actPress (s : State) (kind : Kind) (k : Nat) : State :=
+  if canAct s kind k then
+    match s.rows.item? k with
+    | some it =>
+      match kind with
+      | .mute => { s with acts := s.acts.toggleMute (actKey s .mute it) }
+      | _ => { s with acts := Acts.toggle (ctxOf s) s.acts kind (actKey s kind it) }
+    | none => s
+  else s
+
 /-- What Sky does: the person's moves and the host's messages. -/
 inductive Cmd where
   | signIn
@@ -571,6 +648,8 @@ inductive Cmd where
   | openPost (k : Nat)
   /-- Show the new posts: the list starts again at the top. -/
   | showNew
+  /-- Like, repost, follow or mute from the row with key `k`. -/
+  | act (kind : Kind) (k : Nat)
   | msg (m : Msg)
 
 def step0 (s : State) : Cmd → State × List Effect
@@ -591,14 +670,45 @@ def step0 (s : State) : Cmd → State × List Effect
   | .appearRow k => appearRow s k
   | .openPost k => openPost s k
   | .showNew => ({ s with gen := s.gen + 1, fresh := 0 }, [])
+  | .act kind k => (actPress s kind k, [])
   | .msg m => receive0 s m
 
-/-- The input, then `settle`, then the rows follow the feed (`tidy`). -/
+/-- The acts' outbox emptied: each step starts with nothing to send. -/
+def clearOut (s : State) : State := { s with acts := { s.acts with outbox := [] } }
+
+/-- Send what the acts queued: each call under a new call id, through the session (`drive`),
+remembered with what it is for (`Acts.reqs`); each effect as it is. -/
+def flushJobs (s : State) : List Job → State × List Effect
+  | [] => (s, [])
+  | .effect e :: js =>
+    let r := flushJobs s js
+    (r.1, e :: r.2)
+  | .call q c :: js =>
+    let id := s.nextCall
+    let d := drive { s with nextCall := id + 1, acts := { s.acts with reqs := s.acts.reqs.insert id q } }
+      (.call id c)
+    let r := flushJobs d.1 js
+    (r.1, d.2 ++ r.2)
+
+/-- Send the acts' outbox, with a live session; otherwise drop it (`settle` empties the acts). -/
+def flush (s : State) : State × List Effect :=
+  match s.acts.outbox with
+  | [] => (s, [])
+  | js =>
+    if live s.session then flushJobs (clearOut s) js
+    else (clearOut s, [])
+
+/-- Flush only after a step that began signed in: one that began signed out has no acts. -/
+def flushIf (live₀ : Bool) (s : State) : State × List Effect := if live₀ then flush s else (s, [])
+
+/-- The input (with the acts' outbox empty), the acts' calls sent (`flush`), then `settle`, then
+the rows follow the feed (`tidy`). -/
 def step1 (s : State) (i : Cmd) : State × List Effect :=
-  let (s₁, e₁) := step0 s i
-  let (s₂, e₂) := settle s₁
+  let (s₁, e₁) := step0 (clearOut s) i
+  let (s₁', e₁') := flushIf (live s.session) s₁
+  let (s₂, e₂) := settle s₁'
   let (s₃, e₃) := tidy s₂
-  (s₃, e₁ ++ e₂ ++ e₃)
+  (s₃, e₁ ++ e₁' ++ e₂ ++ e₃)
 
 /-- The state with the password field blank. -/
 def State.blank (s : State) : State := { s with password := {} }
