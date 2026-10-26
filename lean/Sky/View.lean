@@ -659,35 +659,6 @@ def notesStatus (s : State) (ui : UI) : Node :=
           | none, some p => .text { font := { size := 12 }, color := alert } p
           | none, none => .text { font := { size := 12 }, color := muted } (notesLine s)] ])
 
-/-- The known rows for `keys`, each hidden row (`hidden`) a point high whether laid yet or not:
-`rs` is what the runtime knew, moved to the keys' indices (`VList.align`), sorted by index. -/
-def hideRows (hidden : Nat → Bool) : List (Nat × Nat) → List VList.Row → List VList.Row
-  | [], _ => []
-  | (k, i) :: ks, rs =>
-    let rs := rs.dropWhile (·.index < i)
-    let here := match rs with
-      | r :: _ => decide (r.index = i)
-      | [] => false
-    let rest := if here then rs.drop 1 else rs
-    if hidden k then { index := i, key := k, height := 1 } :: hideRows hidden ks rest
-    else if here then rs.take 1 ++ hideRows hidden ks rest
-    else hideRows hidden ks rest
-
-/-- What the feed's list is laid by: the runtime's record, with every row a mute hides known at
-the point it lays at. A mute can hide many rows at once, each recorded taller; laid by the
-record alone, the list would learn them a window at a time, a layout each, and could show a
-frame laid by heights it no longer has. Known, the list is laid right in the layout after the
-mute, and the record keeps the post being read still (`VList.record_keeps`, ^35). Until the
-runtime settles a list however many layouts it takes (cairn#276). -/
-def feedUI (s : State) (ui : UI) : UI :=
-  if s.acts.tables.mutes.size == 0 then ui else
-  let r := listRef s
-  let keys := s.rows.keys
-  let fix (k : VList.Known) : VList.Known :=
-    { k with rows := (hideRows (hiddenAt s) keys.toList.zipIdx (VList.align keys k).toList).toArray,
-             count := keys.size }
-  { ui with lists := ui.lists.map fun (x, k) => if x == r then (x, fix k) else (x, k) }
-
 /-- One of the two places, as a segment of the control that switches them (^61, ^62): selected
 when it shows. Pressed again, it goes to the top of its list. -/
 def segment (ui : UI) (claim : Nat) (label : String) (on : Bool) (count : Option String := none) : Node :=
@@ -725,7 +696,7 @@ def feedView (s : State) (ui : UI) : List Node :=
          else (if canNoteRefresh s then button ui 63 "Refresh" 84 else greyButton "Refresh" 84)) ] ] ++
   (if home then
     [ statusRow s ui,
-      VList.node (feedList s) (feedUI s ui) s.rows.keys (rowOf s ui) ]
+      VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
    else
     [ notesStatus s ui,
       VList.node (notesList s) ui (noteKeys s) (noteRowOf s ui) ])
