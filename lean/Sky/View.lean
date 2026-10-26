@@ -217,11 +217,20 @@ def mediaLine : Media → Option String
   | .external e => some ((if e.title.isEmpty then e.uri else e.title) ++ " · " ++ domainOf e.uri)
   | .other t => some (if (t.splitOn "video").length > 1 then "Video" else "Embedded content")
 
+/-- What a muted account's post shows instead of itself (^42). -/
+def mutedWords : String := "Post from an account you muted"
+def mutedQuote : String := "Quoted post from an account you muted"
+
+/-- A quoted post's line, unless its author is muted. -/
+def quoteLineFor (s : State) : Quote → String
+  | .post q => if s.acts.muted q.author.did then mutedQuote else quoteLine (.post q)
+  | q => quoteLine q
+
 /-- Other embeds, one line each: a link's title and domain, a quoted post, a video. -/
-def embedLines : Option Embed → List String
+def embedLines (s : State) : Option Embed → List String
   | some (.external e) => [(if e.title.isEmpty then e.uri else e.title) ++ " · " ++ domainOf e.uri]
-  | some (.record q) => [quoteLine q]
-  | some (.recordWithMedia q m) => (mediaLine m).toList ++ [quoteLine q]
+  | some (.record q) => [quoteLineFor s q]
+  | some (.recordWithMedia q m) => (mediaLine m).toList ++ [quoteLineFor s q]
   | some (.other t) => [if (t.splitOn "video").length > 1 then "Video" else "Embedded content"]
   | _ => []
 
@@ -243,13 +252,50 @@ def contextLines (it : FeedItem) : List Node :=
 
 def plural (n : Nat) (one many : String) : String := s!"{n} " ++ (if n = 1 then one else many)
 
-def countsLine (p : Post) : String :=
-  plural p.replyCount "reply" "replies" ++ " · " ++ plural p.repostCount "repost" "reposts" ++
-    " · " ++ plural p.likeCount "like" "likes"
+/-- The counts, with the likes and reposts as the acts show them (`Acts.likeCount`). -/
+def countsLine (s : State) (p : Post) : String :=
+  plural p.replyCount "reply" "replies" ++ " · " ++ plural (s.acts.repostCount p) "repost" "reposts" ++
+    " · " ++ plural (s.acts.likeCount p) "like" "likes"
+
+/-- A small text button for an act on row `k` (^37–^40): its control is `⟨claim, k⟩`, inside the
+row's own (the innermost control wins a press). -/
+def actLink (ui : UI) (claim k : Nat) (t name : String) : Node :=
+  .box { height := .fixed lineH, align := .center, padding := ⟨0, 2, 0, 2⟩,
+         border := ring ui ⟨claim, k⟩ }
+    (some { ref := ⟨claim, k⟩, label := name })
+    [.text { font := { size := 12, weight := 600 }, color := accent } t]
+
+/-- The acts a row offers, each exactly when it can be pressed (`canAct`). -/
+def actsRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
+  let p := it.post
+  let h := "@" ++ p.author.handle
+  let one (kind : Kind) (claim : Nat) (t name : String) : List Node :=
+    if canAct s kind k then [actLink ui claim k t name] else []
+  .box { axis := .row, width := .fill, height := .fixed lineH, gap := 14, align := .center } none
+    (one .like 37 (if s.acts.liked p.uri then "Unlike" else "Like")
+        ((if s.acts.liked p.uri then "Unlike " else "Like ") ++ h ++ "'s post") ++
+     one .repost 38 (if s.acts.reposted p.uri then "Undo repost" else "Repost")
+        ((if s.acts.reposted p.uri then "Undo repost of " else "Repost ") ++ h ++ "'s post") ++
+     one .follow 39 (if s.acts.following p.author.did then "Unfollow" else "Follow")
+        ((if s.acts.following p.author.did then "Unfollow " else "Follow ") ++ h) ++
+     one .mute 40 "Mute" ("Mute " ++ h))
+
+/-- A row hidden because its author, or its reposter, is muted (^42): the words and Unmute,
+nothing of the post. -/
+def mutedRow (s : State) (ui : UI) (k : Nat) : Node :=
+  let r : ControlRef := ⟨32, k⟩
+  .box { width := .fill, background := some white, border := ring ui r }
+      (some { ref := r, role := .listItem, appear := true, label := mutedWords })
+    [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 12, 14⟩, gap := 10, align := .center } none
+        ([ .box { width := .fill, height := .fixed lineH, clip := true } none
+            [.text { font := { size := 13 }, color := muted } mutedWords] ] ++
+         (if canAct s .mute k then [actLink ui 40 k "Unmute" "Unmute the account"] else [])),
+      .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
 /-- A post: the avatar, then who and when, the text, the images, other embeds and the counts.
 The whole row opens the post (^32); it tells Sky when it comes into view, to load its images. -/
 def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
+  if hiddenItem s it then mutedRow s ui k else
   let p := it.post
   let r : ControlRef := ⟨32, k⟩
   .box { width := .fill, background := some (if ui.hover = some r then ⟨248, 248, 250, 255⟩ else white),
@@ -266,8 +312,8 @@ def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
                    .text { font := { size := 13 }, color := muted } ("· " ++ relTime s.now p.createdAt) ] ] ++
              (if p.text.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} p.text]) ++
              images s (thumbsOf p.embed) ++
-             (embedLines p.embed).map embedLine ++
-             [textLine (countsLine p) muted 12]) ] ,
+             (embedLines s p.embed).map embedLine ++
+             [textLine (countsLine s p) muted 12, actsRow s ui k it]) ] ,
       .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
 def endH : Nat := 64
@@ -334,9 +380,10 @@ def statusRow (s : State) (ui : UI) : Node :=
   .box { axis := .row, width := .fill, height := .fixed 24, gap := 8, align := .center } none
     (newPosts s ui ++
      [ .box { width := .fill, height := .fixed lineH, clip := true } none
-        [match s.problem with
-         | some p => .text { font := { size := 12 }, color := alert } p
-         | none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ])
+        [match s.problem, s.acts.line with
+         | some p, _ => .text { font := { size := 12 }, color := alert } p
+         | none, some l => .text { font := { size := 12 }, color := alert } l
+         | none, none => .text { font := { size := 12 }, color := muted } (feedLine s.feed)] ])
 
 /-- Signed in: the header (who, Refresh, Account), the account panel, the status line and the
 feed's virtual list. -/

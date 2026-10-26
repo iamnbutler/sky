@@ -38,6 +38,13 @@ meta import Cairn.Claims.Elab
 | ^34 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
 | ^36 | invariant | image loads only for rows near the view; none signed out |
+| ^37 | move | Like or Unlike a post |
+| ^38 | move | Repost or Undo repost |
+| ^39 | move | Follow or Unfollow a post's author |
+| ^40 | move | Mute a post's author, or Unmute on a hidden row |
+| ^41 | invariant | the acts' tables are calm: a settled like, repost, follow or mute shows the server's; counts through `count` |
+| ^42 | invariant | a muted account's posts appear nowhere |
+| ^43 | invariant | signed out ⇒ the acts hold nothing |
 -/
 
 @[expose] public section
@@ -191,6 +198,45 @@ move ^33 showNewMove (s : State) "Show new posts" in ^1 where
     post s' := s.gen < s'.gen ∧ s'.feed = s.feed
     sound := by intro s h; exact showNew_post (bool_left h)
 
+move ^37 likeMove (s : State) (k : Nat) "Like a post" in ^14 where
+  does "While signed in, press Like (Unlike once liked) under a post that isn't hidden."
+  sees "The post shows liked (or not) and its like count moves by one in the same frame, everywhere it appears. Sky writes the like record (putRecord with a record key it mints, or deleteRecord); if the server refuses, the post shows what it did before and the status line says why; if the answer is lost, Sky reads the record back before it believes either."
+  enabled := canAct s .like k
+  on press
+    emit := s.step (.act .like k)
+    post s' := ∀ it, s.rows.item? k = some it → s'.acts.liked it.post.uri = !s.acts.liked it.post.uri
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^38 repostMove (s : State) (k : Nat) "Repost a post" in ^14 where
+  does "While signed in, press Repost (Undo repost once reposted) under a post that isn't hidden."
+  sees "The post shows reposted (or not) and its repost count moves by one in the same frame. The write, a refusal and a lost answer go as for Like (^37)."
+  enabled := canAct s .repost k
+  on press
+    emit := s.step (.act .repost k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.reposted it.post.uri = !s.acts.reposted it.post.uri
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^14 where
+  does "While signed in, press Follow (Unfollow once following) under someone else's post that isn't hidden."
+  sees "Every post by that account shows Unfollow (or Follow) in the same frame. Sky writes the follow record; a refusal and a lost answer go as for Like (^37)."
+  enabled := canAct s .follow k
+  on press
+    emit := s.step (.act .follow k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.following it.post.author.did = !s.acts.following it.post.author.did
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^14 where
+  does "While signed in, press Mute under someone else's post; on a hidden post, press Unmute."
+  sees "Muted, every post by the account, and every repost by it, is replaced by \"Post from an account you muted\" with Unmute, and a post quoting it says \"Quoted post from an account you muted\", in the same frame. Unmuted, they show again. Sky sends muteActor (or unmuteActor); a refusal shows the posts as they were and says why; a lost answer sends the same mute again until one is answered."
+  enabled := canAct s .mute k
+  on press
+    emit := s.step (.act .mute k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.muted (muteTarget s it) = !s.acts.muted (muteTarget s it)
+    sound := by intro s k h it hit; exact act_post h it hit
+
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }
 
@@ -211,7 +257,11 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (reachEnd.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (retryMore.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (postRowMove.preserves _ (fun s _ _ h => hp s _ h) fun s _ _ h => hp s _ h)
-  (Move.all_cons (showNewMove.preserves _ fun s _ h => hp s _ h) Move.all_nil))))))))))))
+  (Move.all_cons (showNewMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (likeMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (repostMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (followMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (muteMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil))))))))))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
@@ -298,6 +348,50 @@ invariant ^36 imagesNearInvariant "Image loads only near the view" for machine w
   init := imagesNear
   step := fun _ _ _ => imagesNear
   receive := fun _ _ _ => imagesNear
+
+/-- ^41: the acts' tables are calm, so a key at rest shows what the server last confirmed, and a
+count shown is never less than the viewer's own part of it. -/
+def ActsSound (s : State) : Prop :=
+  s.acts.tables.Ok ∧ ∀ p : Post, Optimistic.ind (s.acts.liked p.uri) ≤ s.acts.likeCount p ∧
+    Optimistic.ind (s.acts.reposted p.uri) ≤ s.acts.repostCount p
+
+theorem actsSound (s : State) : ActsSound s :=
+  ⟨s.acts.ok, fun p => ⟨s.acts.likeCount_ge p, s.acts.repostCount_ge p⟩⟩
+
+invariant ^41 actsSettle "Likes, reposts, follows and mutes settle on the server's" for machine where
+  does "Each of likes, reposts, follows and mutes is a Cairn.Optimistic table (cairn^1100–^1114), changed only by its feed, so it is always calm: once a post's like (or any key) has no write in flight and no read-back pending, it shows what the server last confirmed, whatever order the replies came in and whichever were lost; a lost write is read back from the account's own repo (getRecord), or for a mute sent again, before it is believed. A count shown is the view's count, less the viewer's own in it, plus what is shown (Cairn.Optimistic.count), so never below the viewer's own. The fuzz drives Sky against cairn_atproto's fake server and checks that every settled key and count matches the server's."
+  holds s := ActsSound s
+  init := actsSound _
+  step := fun _ _ _ => actsSound _
+  receive := fun _ _ _ => actsSound _
+
+/-- ^42: a muted account's posts appear nowhere. -/
+def MutedHidden : Prop :=
+  (∀ (s : State) (it : FeedItem), s.acts.muted it.post.author.did = true → hiddenItem s it = true) ∧
+  (∀ (s : State) (ui : UI) (k : Nat) (it : FeedItem), k ≠ 0 → s.rows.item? k = some it →
+    hiddenItem s it = true → rowOf s ui k = mutedRow s ui k) ∧
+  (∀ (s : State) (q : QuotedPost), s.acts.muted q.author.did = true →
+    quoteLineFor s (.post q) = mutedQuote)
+
+theorem mutedHidden : MutedHidden := by
+  refine ⟨fun s it h => ?_, fun s ui k it hk hit hh => ?_, fun s q h => ?_⟩
+  · simp only [hiddenItem, h, Bool.true_or]
+  · simp only [rowOf, hk, hit, postRow, hh, ↓reduceIte]
+  · simp only [quoteLineFor, h, ↓reduceIte]
+
+invariant ^42 mutedNowhere "A muted account's posts appear nowhere" for machine where
+  does "A post whose author is muted, or a repost by a muted account, shows as one line, \"Post from an account you muted\", with Unmute: the row is built without the post (its text, images, embeds and counts are not read). A quoted post by a muted account shows as \"Quoted post from an account you muted\". Muted means as shown: a mute shows in the step it is pressed (^40)."
+  holds _s := MutedHidden
+  init := mutedHidden
+  step := fun _ _ _ => mutedHidden
+  receive := fun _ _ _ => mutedHidden
+
+invariant ^43 actsGone "Signed out, no acts held" for machine where
+  does "Whenever the session isn't signed in, Sky holds no like, repost, follow or mute, no view of a post, no act in flight and no line about one: signing out drops them, and the next account starts from its own server's."
+  holds s := ActsGone s
+  init := fun _ => rfl
+  step := fun s a h => update_inv (P := ActsGone) (fun s c _ => step_actsGone s c) s a h
+  receive := fun s m _ => step_actsGone s (.msg m)
 
 def claimInfos : List ClaimInfo := claims%
 

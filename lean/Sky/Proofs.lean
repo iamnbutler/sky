@@ -886,6 +886,30 @@ theorem flushIf_flushed (b : Bool) (s : State) : Flushed s (flushIf b s).1 := by
   · exact flush_flushed s
   · exact Flushed.refl s
 
+theorem flushJobs_tables : ∀ (js : List Job) (s : State), live s.session = true →
+    (flushJobs s js).1.acts.tables = s.acts.tables
+  | [], _, _ => rfl
+  | .effect _ :: js, s, h => flushJobs_tables js s h
+  | .call q c :: js, s, h => by
+    simp only [flushJobs]
+    have e := drive_call_eq (s := { s with nextCall := s.nextCall + 1,
+                                           acts := { s.acts with reqs := s.acts.reqs.insert s.nextCall q } })
+      h s.nextCall c
+    rw [flushJobs_tables js]
+    · rw [e]
+    · rw [e]; exact live_call h _ _
+
+/-- Flushing sends what the tables asked for; the tables stay. -/
+theorem flushIf_tables (b : Bool) (s : State) : (flushIf b s).1.acts.tables = s.acts.tables := by
+  unfold flushIf; split
+  · unfold flush
+    split
+    · rfl
+    · split
+      · next h => exact flushJobs_tables _ (clearOut s) h
+      · rfl
+  · rfl
+
 /-- Nothing queued: nothing to flush. -/
 theorem flushIf_nil {s : State} (h : s.acts.outbox = []) (b : Bool) : flushIf b s = (s, []) := by
   unfold flushIf flush; split <;> simp [h]
@@ -1072,5 +1096,77 @@ theorem toggleAccount_post {s : State} (h : live s.session = true) :
 theorem signOut_post (s : State) :
     (s.step .signOut).1.session.phase = .signedOut ∧ (s.step .signOut).1.feed = {} :=
   signOut_post1 s.blank
+
+/-! ## Acting (^37–^40) -/
+
+theorem tidy_acts (t : State) : (tidy t).1.acts = t.acts := by
+  obtain ⟨r, g, f, m, im, e⟩ := tidy_shape t
+  rw [e]
+
+theorem actPress_session (s : State) (kind : Kind) (k : Nat) : (actPress s kind k).session = s.session := by
+  unfold actPress
+  split
+  · split
+    · split <;> rfl
+    · rfl
+  · rfl
+
+/-- An act's step leaves the tables as the press set them: flushing, `settle` and `tidy` don't
+touch them. -/
+theorem act_tables {s : State} {kind : Kind} {k : Nat} (h : live s.session = true) :
+    (s.step (.act kind k)).1.acts.tables = (actPress (clearOut s.blank) kind k).acts.tables := by
+  show (step1 s.blank (.act kind k)).1.acts.tables = _
+  rw [step1_fst, tidy_acts]
+  have hf := flushIf_flushed (live s.blank.session) (step0 (clearOut s.blank) (.act kind k)).1
+  have hl : live (flushIf (live s.blank.session) (step0 (clearOut s.blank) (.act kind k)).1).1.session = true := by
+    rw [hf.live]; show live (actPress (clearOut s.blank) kind k).session = true
+    rw [actPress_session]; exact h
+  rw [settle_live hl]
+  exact flushIf_tables _ _
+
+/-- Signed out, the acts hold nothing: `settle` drops them. -/
+def ActsGone (s : State) : Prop := live s.session = false → s.acts.isEmpty = true
+
+theorem settle_actsGone (t : State) : ActsGone (settle t).1 := by
+  intro h
+  rw [settle_fst] at h ⊢
+  by_cases hl : live t.session = true
+  · rw [ite_cond_eq_true _ _ (eq_true hl), hl] at h; exact absurd h (by decide)
+  · rw [ite_cond_eq_false _ _ (eq_false hl)]; rfl
+
+theorem step_actsGone (s : State) (c : Cmd) : ActsGone (s.step c).1 := by
+  rcases step_cases s c with e | e <;> rw [e]
+  · intro h
+    rw [step1_fst, (tidy_core _).session] at h
+    rw [step1_fst, tidy_acts]; exact settle_actsGone _ h
+  · show ActsGone (step1 s.blank c).1
+    intro h
+    rw [step1_fst, (tidy_core _).session] at h
+    rw [step1_fst, tidy_acts]; exact settle_actsGone _ h
+
+/-- ^37–^40: a press on a row shows the other value for its key in the press's own step. -/
+theorem act_post {s : State} {kind : Kind} {k : Nat} (h : canAct s kind k = true) (it : FeedItem)
+    (hit : s.rows.item? k = some it) :
+    (s.step (.act kind k)).1.acts.on kind (actKey s kind it) = !s.acts.on kind (actKey s kind it) := by
+  have hl : live s.session = true := by
+    simp only [canAct, Bool.and_eq_true] at h; exact h.1
+  have e : ∀ a b : Acts, a.tables = b.tables → ∀ key, a.on kind key = b.on kind key := by
+    intro a b hab key; cases kind <;> simp only [Acts.on, hab]
+  rw [e _ _ (act_tables hl)]
+  have hc : canAct (clearOut s.blank) kind k = true := h
+  have hit' : (clearOut s.blank).rows.item? k = some it := hit
+  cases kind with
+  | mute =>
+    simp only [actPress, hc, hit', ↓reduceIte]
+    exact Acts.toggleMute_on _ _
+  | like =>
+    simp only [actPress, hc, hit', ↓reduceIte]
+    exact Acts.toggle_on _ _ _ (by decide) _
+  | repost =>
+    simp only [actPress, hc, hit', ↓reduceIte]
+    exact Acts.toggle_on _ _ _ (by decide) _
+  | follow =>
+    simp only [actPress, hc, hit', ↓reduceIte]
+    exact Acts.toggle_on _ _ _ (by decide) _
 
 end Sky

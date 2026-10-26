@@ -346,6 +346,58 @@ def Acts.toggle (ctx : Ctx) (a : Acts) (k : Kind) (key : String) : Acts :=
 def Acts.toggleMute (a : Acts) (did : String) : Acts :=
   Acts.feedMute { a with line := none } (.set did (!·))
 
+/-! ## A press shows at once -/
+
+/-- What a kind shows for a key: liked, reposted, following or muted. -/
+def Acts.on (a : Acts) : Kind → String → Bool
+  | .like, key => (a.tables.likes.shown key).isSome
+  | .repost, key => (a.tables.reposts.shown key).isSome
+  | .follow, key => (a.tables.follows.shown key).isSome
+  | .mute, key => a.tables.mutes.shown key
+
+theorem Acts.foldl_performRec_tables (ctx : Ctx) (k : Kind) :
+    ∀ (os : List (Out String RKey)) (a : Acts), (os.foldl (Acts.performRec ctx k) a).tables = a.tables
+  | [], _ => rfl
+  | o :: os, a => (Acts.foldl_performRec_tables ctx k os _).trans (by cases o <;> rfl)
+
+theorem Acts.foldl_performMute_tables :
+    ∀ (os : List (Out String Bool)) (a : Acts), (os.foldl Acts.performMute a).tables = a.tables
+  | [], _ => rfl
+  | o :: os, a => (Acts.foldl_performMute_tables os _).trans (by
+      cases o <;> first | rfl | (simp only [Acts.performMute]; split <;> rfl))
+
+theorem Acts.feedRec_tables (ctx : Ctx) (a : Acts) (k : Kind) (i : Input String RKey) :
+    (Acts.feedRec ctx a k i).tables = (a.tables.feedRec k i).1 :=
+  Acts.foldl_performRec_tables ctx k _ _
+
+theorem Acts.feedMute_tables (a : Acts) (i : Input String Bool) :
+    (a.feedMute i).tables = (a.tables.feedMute i).1 :=
+  Acts.foldl_performMute_tables _ _
+
+theorem Acts.mint_tables (a : Acts) (now : Nat) : (a.mint now).1.tables = a.tables := by
+  unfold Acts.mint; split <;> rfl
+
+/-- A press of like, repost or follow shows the other value in its own step. -/
+theorem Acts.toggle_on (ctx : Ctx) (a : Acts) (k : Kind) (hk : k ≠ .mute) (key : String) :
+    (Acts.toggle ctx a k key).on k key = !a.on k key := by
+  have ht := Acts.mint_tables a ctx.nowMs
+  cases k with
+  | mute => exact absurd rfl hk
+  | like =>
+    simp only [Acts.toggle, Acts.on, Acts.feedRec_tables, Tables.feedRec, Table.shown_set, ht]
+    split <;> simp_all
+  | repost =>
+    simp only [Acts.toggle, Acts.on, Acts.feedRec_tables, Tables.feedRec, Table.shown_set, ht]
+    split <;> simp_all
+  | follow =>
+    simp only [Acts.toggle, Acts.on, Acts.feedRec_tables, Tables.feedRec, Table.shown_set, ht]
+    split <;> simp_all
+
+/-- A press of mute shows the other value in its own step. -/
+theorem Acts.toggleMute_on (a : Acts) (did : String) :
+    (a.toggleMute did).on .mute did = !a.on .mute did := by
+  simp only [Acts.toggleMute, Acts.on, Acts.feedMute_tables, Tables.feedMute, Table.shown_set]
+
 /-! ## Views -/
 
 /-- A post seen in the answer to call `call`: its view kept if newer than the last, and the
@@ -377,11 +429,20 @@ def Acts.seeProfile (ctx : Ctx) (a : Acts) (p : Profile) : Acts :=
     let a := Acts.feedRec ctx a .follow (.seen p.did following)
     a.feedMute (.seen p.did p.viewer.muted)
 
-/-- The posts and accounts of a feed item: the post and its author, the reposter, and the reply's
-parent and root. -/
+/-- The author of the post a post quotes, if it quotes one. -/
+def quotedAuthor : Option Embed → Option Profile
+  | some (.record (.post q)) => some q.author
+  | some (.recordWithMedia (.post q) _) => some q.author
+  | _ => none
+
+/-- The posts and accounts of a feed item: the post and its author, the quoted post's author, the
+reposter, and the reply's parent and root. -/
 def Acts.seeItem (ctx : Ctx) (call : Nat) (a : Acts) (it : FeedItem) : Acts :=
   let a := Acts.seePost ctx call a it.post
   let a := Acts.seeProfile ctx a it.post.author
+  let a := match quotedAuthor it.post.embed with
+    | some q => Acts.seeProfile ctx a q
+    | none => a
   let a := match it.reason with
     | some (.repost b _) => Acts.seeProfile ctx a b
     | _ => a
