@@ -490,7 +490,7 @@ def noteMenu (s : State) (k : Nat) (a : Profile) : List MenuItem :=
     [.item { ref := ⟨81, k⟩, label := copyLinkWords }, .item { ref := ⟨82, k⟩, label := openWords }]
 
 /-- A toggle under a notification's post, as the feed's (`toggle`), with its own menu. -/
-def noteToggle (s : State) (ui : UI) (c : Control) (glyph : String) (n : Nat) (onColor : Color)
+def noteToggle (ui : UI) (c : Control) (glyph : String) (n : Nat) (onColor : Color)
     (busy : Bool) (menu : List MenuItem) : Node :=
   let on := c.checked == some true
   .box { axis := .row, height := .fixed 22, align := .center, padding := ⟨0, 8, 0, 8⟩, radius := 11,
@@ -507,12 +507,12 @@ def noteActs (s : State) (ui : UI) (k : Nat) (a : Profile) : Node :=
     | some p =>
       (if canNoteAct s .repost k then
         let on := s.acts.reposted p.uri
-        [noteToggle s ui { ref := ⟨77, k⟩, label := "Repost, " ++ plural (s.acts.repostCount p) "repost" "reposts",
+        [noteToggle ui { ref := ⟨77, k⟩, label := "Repost, " ++ plural (s.acts.repostCount p) "repost" "reposts",
                            checked := some on, selected := on } "⇄" (s.acts.repostCount p) repostGreen
           (s.acts.tables.reposts.inFlight p.uri) menu] else []) ++
       (if canNoteAct s .like k then
         let on := s.acts.liked p.uri
-        [noteToggle s ui { ref := ⟨76, k⟩, label := "Like, " ++ plural (s.acts.likeCount p) "like" "likes",
+        [noteToggle ui { ref := ⟨76, k⟩, label := "Like, " ++ plural (s.acts.likeCount p) "like" "likes",
                            checked := some on, selected := on } (if on then "♥" else "♡") (s.acts.likeCount p) likeRed
           (s.acts.tables.likes.inFlight p.uri) menu] else [])
     | none => []

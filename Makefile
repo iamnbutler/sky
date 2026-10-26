@@ -6,7 +6,7 @@ export RESERVOIR_API_URL := https://cairn.registry.nexthub.sh/api/v1
 CAIRN_PKG = lean/.lake/packages/cairn
 CAIRN = $(CAIRN_PKG)/tools/cairn/.build/release/cairn
 
-.PHONY: deps cairn-tool build app selftest act-media bench bench-lean lean lint audit ledger ledger-update kernel fuzz size claims check clean
+.PHONY: deps cairn-tool build app selftest act-media notes-media bench bench-lean lean lint audit ledger ledger-update kernel fuzz size claims check clean
 
 # Fetch Cairn, cairn_json and cairn_atproto as lean/lake-manifest.json pins them.
 deps:
@@ -45,6 +45,13 @@ selftest: build
 act-media: build
 	rm -rf $(HOME_TEST) build/frames && mkdir -p $(HOME_TEST) build/media && CFFIXED_USER_HOME=$(HOME_TEST) swift run Sky --act-frames $(FAKE_PDS) build/frames
 	for v in like mute; do ffmpeg -loglevel error -y -framerate 30 -i build/frames/$$v/%04d.png -c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le build/media/act-$$v.mov; done
+	rm -rf build/frames
+
+# cairn#255's video: `Sky --notes-frames` renders notifications arriving and being read against
+# the fake offscreen, and ffmpeg makes build/media/notes.mov from the frames.
+notes-media: build
+	rm -rf $(HOME_TEST) build/frames && mkdir -p $(HOME_TEST) build/media && CFFIXED_USER_HOME=$(HOME_TEST) swift run Sky --notes-frames $(FAKE_PDS) build/frames
+	ffmpeg -loglevel error -y -framerate 30 -i build/frames/notes/%04d.png -c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le build/media/notes.mov
 	rm -rf build/frames
 
 # bench/README.md: `cairn bench` (a release build, then `Sky --bench` against the fake PDS, with a
