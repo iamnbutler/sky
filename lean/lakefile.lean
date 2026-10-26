@@ -26,3 +26,8 @@ lean_lib Checks
 lean_exe fuzz where
   root := `FuzzMain
 
+
+/-- `lake exe bench`: Sky's feed of 1,000 posts in flings, each frame timed by phase, against
+cairn_atproto's Lean fake (bench/README.md). -/
+lean_exe bench where
+  root := `Bench

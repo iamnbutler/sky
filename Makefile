@@ -6,7 +6,7 @@ export RESERVOIR_API_URL := https://cairn.registry.nexthub.sh/api/v1
 CAIRN_PKG = lean/.lake/packages/cairn
 CAIRN = $(CAIRN_PKG)/tools/cairn/.build/release/cairn
 
-.PHONY: deps cairn-tool build app selftest lean lint audit ledger ledger-update kernel fuzz size claims check clean
+.PHONY: deps cairn-tool build app selftest bench bench-lean lean lint audit ledger ledger-update kernel fuzz size claims check clean
 
 # Fetch Cairn, cairn_json and cairn_atproto as lean/lake-manifest.json pins them.
 deps:
@@ -39,6 +39,15 @@ FAKE_PDS = lean/.lake/packages/cairn_atproto/tools/fake-pds/server.ts
 
 selftest: build
 	rm -rf $(HOME_TEST) && mkdir -p $(HOME_TEST) && CFFIXED_USER_HOME=$(HOME_TEST) swift run Sky --selftest $(FAKE_PDS) --shots build/shots
+
+# bench/README.md: `cairn bench` (a release build, then `Sky --bench` against the fake PDS, with a
+# home of its own like the selftest's), and Sky's frames by phase in Lean (`lake exe bench`).
+HOME_BENCH = $(CURDIR)/build/home-bench
+bench: cairn-tool
+	rm -rf $(HOME_BENCH) && mkdir -p $(HOME_BENCH) && CFFIXED_USER_HOME=$(HOME_BENCH) $(CAIRN) bench
+
+bench-lean:
+	cd lean && LAKE_ARTIFACT_CACHE=false lake build bench && LEAN_ABORT_ON_NONLINEAR=1 .lake/build/bin/bench
 
 # The Lean side alone. `cairn build` turns Lake's artifact cache on, which keeps .olean files out
 # of the build directory, and the ledger and audit import from there: turn it off.
