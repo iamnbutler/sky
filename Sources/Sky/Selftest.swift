@@ -188,7 +188,13 @@ final class Selftest {
     func menu(_ k: UInt32) -> [MenuRecord] {
         let owner = ControlRef(claim: 52, key: k)
         click(owner)
-        return openMenu(owner, until(2, "\(owner.label)'s menu didn't open") { self.openMenu(owner, $0) != nil }) ?? []
+        let end = Date().addingTimeInterval(2)
+        while Date() < end {
+            if let m = engine?.latest.flatMap({ openMenu(owner, $0.frame) }) { return m }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let st = frame.surface(1)?.status
+        fail("\(owner.label)'s menu didn't open: the window's menu is \(st?.control.label ?? "-") with \(st?.menu.count ?? 0) items; \(owner.label) is \(node(owner).map { "\($0.rect)" } ?? "not in the frame")")
     }
     /// Chooses `r` in the open control menu; the host then says it closed.
     func choose(_ r: ControlRef) { engine?.send([.menuSelect(place: 1, r), .menuClose(place: 1)]) }
@@ -241,7 +247,7 @@ final class Selftest {
     /// The feed's list: the largest clip the frame pushes.
     func listRect(_ f: Frame) -> Rect? {
         var best: Rect?
-        for d in f.draws { if case let .pushClip(r) = d, r.w >= 300, r.h >= 300, r.h > (best?.h ?? 0) { best = r } }
+        for d in f.draws { if case let .pushClip(r) = d, r.y > 0, r.w >= 300, r.h >= 300, r.h > (best?.h ?? 0) { best = r } }
         return best
     }
     /// The post rows (^32#k) by key: where each is laid.
@@ -265,7 +271,7 @@ final class Selftest {
     /// Rows whose Like and ⋯ are wholly inside the list, top first.
     func actable(_ f: Frame) -> [UInt32] {
         guard let l = listRect(f) else { return [] }
-        let inside = { (r: Rect) in r.y >= l.y && r.y + r.h <= l.y + l.h }
+        let inside = { (r: Rect) in r.h > 0 && r.y >= l.y && r.y + r.h <= l.y + l.h }
         return rows(f).keys.sorted { rows(f)[$0]!.y < rows(f)[$1]!.y }.filter { k in
             guard let a = node(ControlRef(claim: 37, key: k), f), let m = node(ControlRef(claim: 52, key: k), f) else { return false }
             return inside(a.rect) && inside(m.rect)
@@ -312,7 +318,7 @@ final class Selftest {
             self.actable(f).count >= 2 && self.actable(f).contains { self.authors(f)[$0] != me }
         }
         let ks = actable(fr)
-        guard let k = ks.first(where: { authors(fr)[$0] != me }), let k2 = ks.first(where: { $0 != k }) else { fail("no rows") }
+        guard let k = ks.first(where: { authors(fr)[$0] != me && on(ControlRef(claim: 37, key: $0), fr) == false }) else { fail("no rows") }
         let like = ControlRef(claim: 37, key: k), repost = ControlRef(claim: 38, key: k)
         let records0 = f.records().count
 
@@ -339,8 +345,12 @@ final class Selftest {
         guard on(repost) == true else { fail("the repost didn't hold") }
 
         // Follow from the ⋯ menu: the menu then says Unfollow.
-        guard let who = authors(frame)[k] else { fail("no author on row \(k)") }
-        let items = menu(k)
+        // On a row wholly in view now: the unread poll's refresh may have put posts above.
+        let ff = frame
+        guard let kf = actable(ff).first(where: { authors(ff)[$0] != me }), let who = authors(ff)[kf] else {
+            fail("no one else's post in view to follow")
+        }
+        let items = menu(kf)
         guard let follow = items.first(where: { $0.control?.claim == 39 }) else {
             fail("no Follow in \(who)'s menu: \(items.map(\.label))")
         }
@@ -352,7 +362,7 @@ final class Selftest {
         choose(follow.control!)
         guard f.awaitRecords(records0 + (followed ? 2 : 0)) else { fail("the follow wasn't made on the server") }
         Thread.sleep(forTimeInterval: 1.5)
-        let again = menu(k)
+        let again = menu(kf)
         guard again.first(where: { $0.control?.claim == 39 })?.label == (followed ? "Unfollow " : "Follow ") + who else {
             fail("the menu doesn't show the follow: \(again.map(\.label))")
         }
@@ -360,6 +370,10 @@ final class Selftest {
         shot("followed")
 
         // A refused like: shown, then rolled back with its line, said aloud.
+        let fl = frame
+        guard let k2 = actable(fl).first(where: { $0 != k && on(ControlRef(claim: 37, key: $0), fl) == false }) else {
+            fail("no unliked post in view")
+        }
         let like2 = ControlRef(claim: 37, key: k2)
         f.control("fail?n=1&kind=400")
         click(like2)
@@ -383,18 +397,26 @@ final class Selftest {
         guard f.records().count == records1 + 1 else { fail("the lost like was made \(f.records().count - records1) times") }
 
         // Mute an author mid-feed: their posts and reposts are gone, the post being read stays put.
-        wheel(40, 4)
-        fr = until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
-        Thread.sleep(forTimeInterval: 0.3)
-        fr = frame
-        guard let reader = firstShown(fr) else { fail("no post being read") }
-        let byAuthor = authors(fr)
-        // The author with the most posts on screen, not the reader's post's nor the tester's.
-        let count = { (a: String) in byAuthor.values.filter { $0 == a }.count }
-        guard let (mk, muted) = actable(fr).compactMap({ k -> (UInt32, String)? in
-            guard let a = byAuthor[k], a != me, a != byAuthor[reader.key] else { return nil }
-            return (k, a)
-        }).max(by: { count($0.1) < count($1.1) }) else { fail("no other author's post to mute") }
+        // Down the feed until an author other than the reader's has two posts showing.
+        var pick: (UInt32, String)?
+        var reader: (key: UInt32, y: Int32) = (0, 0)
+        var byAuthor: [UInt32: String] = [:]
+        for _ in 0..<40 {
+            wheel(40, 3)
+            until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
+            Thread.sleep(forTimeInterval: 0.3)
+            fr = frame
+            guard let r = firstShown(fr) else { continue }
+            reader = r
+            byAuthor = authors(fr)
+            let seen = byAuthor
+            pick = actable(fr).compactMap({ k -> (UInt32, String)? in
+                guard let a = seen[k], a != me, a != seen[r.key], seen.values.filter({ $0 == a }).count >= 2 else { return nil }
+                return (k, a)
+            }).first
+            if pick != nil { break }
+        }
+        guard let (mk, muted) = pick else { fail("no author with two posts showing") }
         let mute = menu(mk).first { $0.control?.claim == 40 }
         guard let mute, mute.label == "Mute \(muted)" else { fail("no Mute \(muted) in the menu") }
         let shownBefore = authors(fr).values.filter { $0 == muted }.count
