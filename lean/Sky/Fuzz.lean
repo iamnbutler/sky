@@ -184,6 +184,10 @@ def fuzz : Cairn.Fuzz.Custom State where
     | 7 => some FakeCheck.typePassword
     | 8 => some FakeCheck.typeService
     | _ => none
+  -- Cairn 0.5.0's presence check counts a list that left as hidden for good, so after a refresh
+  -- (a new list ref) the controls in the new list's rows fail it (cairn#268, fixed for 0.5.1).
+  -- Until that release, the row moves are exempt from presence; drop this with the bump.
+  noControl := [30, 31, 32]
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
     s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty &&
