@@ -208,9 +208,7 @@ final class Bench {
     }
 
     func signOut() {
-        t.click(13)
-        t.until(2, "no account panel") { self.t.node(11, $0) != nil }
-        t.click(11)
+        t.engine?.send([.menuSelect(place: 48, ControlRef(claim: 49))])  // Sky ▸ Sign Out
         t.until(5, "not signed out") { self.t.node(6, $0) != nil }
         let end = Date().addingTimeInterval(5)
         while Date() < end, !t.store.held.isEmpty { usleep(20_000) }

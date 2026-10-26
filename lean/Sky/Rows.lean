@@ -162,13 +162,15 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
   | openPost k =>
     simp only [step0, Sky.openPost]
     split <;> rfl
-  | act kind k =>
-    simp only [step0, actPress]
+  | act kind k => exact (actStep_core s kind k).2.2.2.2.1
+  | undoMute =>
+    simp only [step0, undoMuteStep]
     split
-    · split
-      · split <;> rfl
-      · rfl
+    · split <;> rfl
     · rfl
+  | copyLink k =>
+    simp only [step0, Sky.copyLink]
+    split <;> rfl
   | msg m =>
     simp only [step0]
     cases m with
@@ -197,7 +199,7 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
       · rfl
       · split
         · exact (flushNotes_rows _).trans (hearSeen_rows _ _)
-        · rfl
+        · split <;> rfl
     | sub sb e =>
       cases e
       case tick => exact flushNotes_rows _
@@ -406,7 +408,9 @@ def canShowNew (s : State) : Bool := live s.session && s.fresh != 0
 
 def newPostsLabel (n : Nat) : String := if n = 1 then "1 new post" else s!"{n} new posts"
 
-def canOpenRow (s : State) (k : Nat) : Bool := live s.session && s.rows.has k
+/-- A post's row can be opened (or its link copied): signed in, and the row shows (not hidden by a
+mute). -/
+def canOpenRow (s : State) (k : Nat) : Bool := live s.session && s.rows.has k && !hiddenAt s k
 
 theorem tidy_gen (t : State) : t.gen ≤ (tidy t).1.gen := by
   unfold tidy restart

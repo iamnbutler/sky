@@ -67,6 +67,9 @@ def accountPath : String := "~/Library/Application Support/dev.cairn.sky/account
 /-- Bluesky's page for making an app password. -/
 def appPasswordsUrl : String := "https://bsky.app/settings/app-passwords"
 
+/-- How long a rollback's line, or a mute's Undo, stays in the status line (`Acts.lineTimer`). -/
+def lineMs : Nat := Acts.lineMs
+
 /-- How long a sign-in or resume may take before Cancel is offered. -/
 def slowTimer : String := "slow"
 def slowMs : Nat := 3000
@@ -170,8 +173,6 @@ structure State where
   forgetting : List Nat := []
   /-- What went wrong last, in words. -/
   problem : Option String := none
-  /-- The account panel (who is signed in, and Sign out) is open. -/
-  accountOpen : Bool := false
   /-- A sign-in or resume has taken a while (`slowTimer`): Cancel is offered. -/
   slow : Bool := false
   /-- The feed's rows. -/
@@ -192,6 +193,8 @@ structure State where
   notes : Notes := {}
   /-- Which list the window shows. -/
   tab : Tab := .home
+  /-- The account just muted from a row: the status line offers Undo until `lineTimer`. -/
+  undoMute : Option String := none
 deriving Repr, Inhabited
 
 /-! ## Reading the state -/
@@ -638,15 +641,14 @@ def driveSession (s : State) (i : Session.Input) : State × List Effect :=
 def signIn (s : State) : State × List Effect :=
   if ready s then
     let (s₁, e₁) := driveSession { s with password := Text.SecureField.empty passwordHint,
-                                          host := serviceOf s, problem := none, accountOpen := false,
-                                          slow := false }
+                                          host := serviceOf s, problem := none, slow := false }
       (.signIn (serviceOf s) (identifierOf s) s.password.text)
     (s₁, e₁ ++ [.setTimer slowTimer slowMs])
   else (s, [])
 
 /-- Sign out (or, while signing in, stop): forget both items, and the saved account. -/
 def signOut (s : State) : State × List Effect :=
-  let (s₁, e₁) := driveSession { s with problem := none, accountOpen := false } .signOut
+  let (s₁, e₁) := driveSession { s with problem := none } .signOut
   let (s₂, e₂) := sendOwn s₁ .delete (.deleteFile accountPath)
   (s₂, e₁ ++ e₂)
 
@@ -751,6 +753,7 @@ def receive0 (s : State) : Msg → State × List Effect
       let (s₁, e₁) := hearSeen s .retry
       let (s₂, e₂) := flushNotes s₁
       (s₂, e₁ ++ e₂)
+    else if n = Acts.lineTimer then ({ s with acts := s.acts.clearLine, undoMute := none }, [])
     else ({ s with acts := s.acts.timer (ctxOf s) n }, [])
   | .clock t => ({ s with now := t }, [])
   | .sub _ (.evicted src) => ({ s with images := (s.images.evicted src).1 }, (s.images.evicted src).2)
@@ -762,7 +765,7 @@ has taken on cancelled (the session's `Input.cancel`), the acts' with the rest. 
 def settle (s : State) : State × List Effect :=
   if live s.session then (s, [])
   else ({ s with feed := {}, session := (Session.step s.session (.cancel (pids s.session))).1,
-                 acts := {},
+                 acts := {}, undoMute := none,
                  notes := { did := s.notes.did, seen := s.notes.seen.reset, gen := s.notes.gen }, tab := .home },
         cancelEffects (Session.step s.session (.cancel (pids s.session))).2)
 
@@ -811,16 +814,24 @@ def muteTarget (s : State) (it : FeedItem) : String :=
     | some (.repost b _) => if s.acts.muted b.did then b.did else it.post.author.did
     | _ => it.post.author.did
 
-/-- Whether `kind` can be pressed on the row with key `k`: signed in, a post's row; like, repost
-and follow on a row that shows (follow and mute not on the account's own posts); mute on any. -/
+/-- Whether the row with key `k` is a post hidden by a mute (it lays at a point's height, with
+no control). -/
+def hiddenAt (s : State) (k : Nat) : Bool :=
+  match s.rows.item? k with
+  | some it => hiddenItem s it
+  | none => false
+
+/-- Whether `kind` can be pressed on the row with key `k`: signed in, a post's row that shows
+(not hidden by a mute); follow and mute not on the account's own posts. -/
 def canAct (s : State) (kind : Kind) (k : Nat) : Bool :=
   live s.session &&
     match s.rows.item? k with
     | none => false
     | some it =>
+      !hiddenItem s it &&
       match kind with
-      | .like | .repost => !hiddenItem s it
-      | .follow => !hiddenItem s it && it.post.author.did != (ctxOf s).did
+      | .like | .repost => true
+      | .follow => it.post.author.did != (ctxOf s).did
       | .mute => muteTarget s it != (ctxOf s).did
 
 /-- The key `kind` acts on, from the row's item. -/
@@ -842,6 +853,37 @@ def actPress (s : State) (kind : Kind) (k : Nat) : State :=
     | none => s
   else s
 
+/-- A press of `kind` on row `k`, and what it says: a mute that hides an account offers Undo in
+the status line for `lineMs` (the account in `undoMute`, and the line's timer). -/
+def actStep (s : State) (kind : Kind) (k : Nat) : State × List Effect :=
+  let s' := actPress s kind k
+  match kind, s.rows.item? k with
+  | .mute, some it =>
+    if canAct s .mute k && s'.acts.muted (muteTarget s it) then
+      ({ s' with undoMute := some (muteTarget s it) }, [.setTimer Acts.lineTimer lineMs])
+    else (s', [])
+  | _, _ => (s', [])
+
+/-- Undo is offered: an account muted from a row, still shown muted, while signed in. -/
+def canUndoMute (s : State) : Bool :=
+  live s.session &&
+    match s.undoMute with
+    | some d => s.acts.muted d
+    | none => false
+
+/-- Undo the mute the status line offers: the account is unmuted (its posts show again in this
+step), and the offer goes. -/
+def undoMuteStep (s : State) : State :=
+  match s.undoMute with
+  | some d => if canUndoMute s then { s with acts := s.acts.toggleMute d, undoMute := none } else s
+  | none => s
+
+/-- Copy row `k`'s post's link (on bsky.app) to the clipboard. -/
+def copyLink (s : State) (k : Nat) : State × List Effect :=
+  match s.rows.item? k with
+  | some it => (s, [.setClipboard (postUrl it.post)])
+  | none => (s, [])
+
 /-- What Sky does: the person's moves and the host's messages. -/
 inductive Cmd where
   | signIn
@@ -855,8 +897,6 @@ inductive Cmd where
   | nextField
   /-- Open Bluesky's app-passwords page. -/
   | openHelp
-  /-- Open or close the account panel. -/
-  | toggleAccount
   /-- The row with key `k` came into view. -/
   | appearRow (k : Nat)
   /-- Open the post of the row with key `k`. -/
@@ -875,6 +915,10 @@ inductive Cmd where
   | noteMore
   /-- The notifications row with key `k` came into view. -/
   | noteAppear (k : Nat)
+  /-- Undo the mute the status line offers. -/
+  | undoMute
+  /-- Copy the link of the post of the row with key `k`. -/
+  | copyLink (k : Nat)
   | msg (m : Msg)
 
 def step0 (s : State) : Cmd → State × List Effect
@@ -891,11 +935,12 @@ def step0 (s : State) : Cmd → State × List Effect
     ({ s with service := (Text.Field.apply op s.service).1 }, (Text.Field.apply op s.service).2)
   | .nextField => (s, [.focus passwordRef])
   | .openHelp => sendOwn s .openHelp (.openItem appPasswordsUrl)
-  | .toggleAccount => ({ s with accountOpen := !s.accountOpen }, [])
   | .appearRow k => appearRow s k
   | .openPost k => openPost s k
   | .showNew => ({ s with gen := s.gen + 1, fresh := 0 }, [])
-  | .act kind k => (actPress s kind k, [])
+  | .act kind k => actStep s kind k
+  | .undoMute => (undoMuteStep s, [])
+  | .copyLink k => copyLink s k
   | .openNotes => openNotes s
   | .openHome => ({ s with tab := .home }, [])
   | .noteRefresh => startNoteRefresh s

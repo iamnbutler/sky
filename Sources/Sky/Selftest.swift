@@ -58,16 +58,24 @@ final class FakePDS {
         _ = done.wait(timeout: .now() + 5)
     }
 
-    /// `GET /control/state`: the server's state, as JSON.
+    /// `GET /control/state`: the server's state (the tester's records, the accounts muted).
     func state() -> [String: Any] {
-        var out: [String: Any] = [:]
         let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var out: [String: Any] = [:]
         URLSession.shared.dataTask(with: URL(string: service + "/control/state")!) { d, _, _ in
-            if let d, let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { out = o }
+            if let d, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { out = j }
             done.signal()
         }.resume()
         _ = done.wait(timeout: .now() + 5)
         return out
+    }
+    /// The tester's records on the server: likes, reposts and follows.
+    func records() -> [String] { state()["records"] as? [String] ?? [] }
+    /// Waits up to `seconds` for the tester's records to number `n`.
+    func awaitRecords(_ n: Int, _ seconds: Double = 8) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { if records().count == n { return true }; Thread.sleep(forTimeInterval: 0.1) }
+        return false
     }
 
     /// Stops the server (this process's child, by its pid).
@@ -143,6 +151,9 @@ final class Selftest {
         (f ?? frame).ax.first { $0.control == ControlRef(claim: claim) }
     }
     func shows(_ text: String, _ f: Frame) -> Bool { f.ax.contains { $0.label == text } }
+    func node(_ r: ControlRef, _ f: Frame? = nil) -> AxNode? { (f ?? frame).ax.first { $0.control == r } }
+    /// Whether the toggle `r` shows on (VoiceOver's "selected").
+    func on(_ r: ControlRef, _ f: Frame? = nil) -> Bool? { node(r, f).map(\.selected) }
 
     @discardableResult
     func until(_ seconds: Double, _ what: String, _ ok: (Frame) -> Bool) -> Frame {
@@ -160,6 +171,31 @@ final class Selftest {
         let p = Point(x: n.rect.x + n.rect.w / 2, y: n.rect.y + n.rect.h / 2)
         engine?.send([.pointerMove(p), .pointerDown(p, .primary, clicks: 1, Mods()), .pointerUp(p, .primary, Mods())])
     }
+
+    /// Clicks the control `r` (a row's, `^N#k`) once the frame offers it.
+    func click(_ r: ControlRef) {
+        guard let n = node(r, until(2, "no control \(r.label)") { self.node(r, $0) != nil }) else { fail("no control \(r.label)") }
+        let p = Point(x: n.rect.x + n.rect.w / 2, y: n.rect.y + n.rect.h / 2)
+        engine?.send([.pointerMove(p), .pointerDown(p, .primary, clicks: 1, Mods()), .pointerUp(p, .primary, Mods())])
+    }
+
+    /// The window's open control menu, if its owner is `owner` (docs/frame.md, "Surface records").
+    func openMenu(_ owner: ControlRef, _ f: Frame) -> [MenuRecord]? {
+        guard let st = f.surface(1)?.status, st.control == owner, !st.menu.isEmpty else { return nil }
+        return st.menu
+    }
+    /// Opens a post's ⋯ menu (^52#k) by clicking it, as a person does, and returns its items.
+    func menu(_ k: UInt32) -> [MenuRecord] {
+        let owner = ControlRef(claim: 52, key: k)
+        click(owner)
+        return openMenu(owner, until(2, "\(owner.label)'s menu didn't open") { self.openMenu(owner, $0) != nil }) ?? []
+    }
+    /// Chooses `r` in the open control menu; the host then says it closed.
+    func choose(_ r: ControlRef) { engine?.send([.menuSelect(place: 1, r), .menuClose(place: 1)]) }
+    func closeMenu() { engine?.send([.menuClose(place: 1)]) }
+    /// The menu bar's items (^48).
+    func menuBar(_ f: Frame) -> [MenuRecord] { f.surface(48)?.status.menu ?? [] }
+    func signOutItem(_ f: Frame) -> MenuRecord? { menuBar(f).first { $0.control == ControlRef(claim: 49) } }
 
     /// Clicks field `claim` and types `text` over what it holds.
     func type(_ claim: UInt32, _ text: String) {
@@ -220,6 +256,24 @@ final class Selftest {
         return rows(f).filter { $0.value.y + $0.value.h > l.y && $0.value.y < l.y + l.h }
             .min { $0.value.y < $1.value.y }.map { ($0.key, $0.value.y) }
     }
+    /// Each post row's author (^32#k is "Post by @handle"), by key.
+    func authors(_ f: Frame) -> [UInt32: String] {
+        var out: [UInt32: String] = [:]
+        for n in f.ax { if let c = n.control, c.claim == 32, n.label.hasPrefix("Post by ") { out[c.key] = String(n.label.dropFirst(8)) } }
+        return out
+    }
+    /// Rows whose Like and ⋯ are wholly inside the list, top first.
+    func actable(_ f: Frame) -> [UInt32] {
+        guard let l = listRect(f) else { return [] }
+        let inside = { (r: Rect) in r.y >= l.y && r.y + r.h <= l.y + l.h }
+        return rows(f).keys.sorted { rows(f)[$0]!.y < rows(f)[$1]!.y }.filter { k in
+            guard let a = node(ControlRef(claim: 37, key: k), f), let m = node(ControlRef(claim: 52, key: k), f) else { return false }
+            return inside(a.rect) && inside(m.rect)
+        }
+    }
+    /// The status line's rollback, if it says one.
+    func rollback(_ f: Frame) -> String? { texts(f).first { $0.hasPrefix("Couldn't ") } }
+
     /// Loaded images drawn (Draw.image appears once the host has the pixels).
     func images(_ f: Frame) -> Int { f.draws.filter { if case .image = $0 { true } else { false } }.count }
     /// Wheel ticks over the list: `dy` points each, toward the end when positive.
@@ -247,6 +301,132 @@ final class Selftest {
         return nil
     }
 
+    /// Acting on posts with the fake's replies slowed (cairn#254): like, unlike, repost and follow
+    /// shown at once and kept; a refused like rolled back with its line; a like whose reply is lost
+    /// after the server made it, settled by a read and made once; a mute hiding an author's posts
+    /// and reposts while the post being read stays put, and Undo bringing them back.
+    func actsScenario(_ f: FakePDS) -> String {
+        f.control("slow?ms=1200")
+        let me = "@" + f.identifier
+        var fr = until(5, "no post by someone else to act on") { f in
+            self.actable(f).count >= 2 && self.actable(f).contains { self.authors(f)[$0] != me }
+        }
+        let ks = actable(fr)
+        guard let k = ks.first(where: { authors(fr)[$0] != me }), let k2 = ks.first(where: { $0 != k }) else { fail("no rows") }
+        let like = ControlRef(claim: 37, key: k), repost = ControlRef(claim: 38, key: k)
+        let records0 = f.records().count
+
+        // Like: shown in the same frame, kept once the slow reply comes.
+        guard on(like, fr) == false else { fail("\(like.label) starts liked") }
+        click(like)
+        until(1, "the like didn't show at once") { self.on(like, $0) == true }
+        shot("like-pending")
+        guard f.awaitRecords(records0 + 1) else { fail("the like wasn't made on the server") }
+        Thread.sleep(forTimeInterval: 1.5)
+        guard on(like) == true, rollback(frame) == nil else { fail("the like didn't hold once answered") }
+        shot("liked")
+
+        // Unlike, then repost.
+        click(like)
+        until(1, "the unlike didn't show at once") { self.on(like, $0) == false }
+        guard f.awaitRecords(records0) else { fail("the unlike wasn't made on the server") }
+        Thread.sleep(forTimeInterval: 1.5)
+        guard on(like) == false else { fail("the unlike didn't hold") }
+        click(repost)
+        until(1, "the repost didn't show at once") { self.on(repost, $0) == true }
+        guard f.awaitRecords(records0 + 1) else { fail("the repost wasn't made on the server") }
+        Thread.sleep(forTimeInterval: 1.5)
+        guard on(repost) == true else { fail("the repost didn't hold") }
+
+        // Follow from the ⋯ menu: the menu then says Unfollow.
+        guard let who = authors(frame)[k] else { fail("no author on row \(k)") }
+        let items = menu(k)
+        guard let follow = items.first(where: { $0.control?.claim == 39 }) else {
+            fail("no Follow in \(who)'s menu: \(items.map(\.label))")
+        }
+        guard items.contains(where: { $0.control?.claim == 40 && $0.label == "Mute \(who)" }),
+              items.contains(where: { $0.control?.claim == 53 }), items.contains(where: { $0.control?.claim == 54 }) else {
+            fail("the post's menu is missing an item: \(items.map(\.label))")
+        }
+        let followed = follow.label == "Follow \(who)"
+        choose(follow.control!)
+        guard f.awaitRecords(records0 + (followed ? 2 : 0)) else { fail("the follow wasn't made on the server") }
+        Thread.sleep(forTimeInterval: 1.5)
+        let again = menu(k)
+        guard again.first(where: { $0.control?.claim == 39 })?.label == (followed ? "Unfollow " : "Follow ") + who else {
+            fail("the menu doesn't show the follow: \(again.map(\.label))")
+        }
+        closeMenu()
+        shot("followed")
+
+        // A refused like: shown, then rolled back with its line, said aloud.
+        let like2 = ControlRef(claim: 37, key: k2)
+        f.control("fail?n=1&kind=400")
+        click(like2)
+        until(1, "the refused like didn't show at once") { self.on(like2, $0) == true }
+        fr = until(5, "no rollback line") { self.on(like2, $0) == false && self.rollback($0) != nil }
+        let line = rollback(fr) ?? ""
+        guard line.hasPrefix("Couldn't like ") else { fail("the rollback says \(line)") }
+        shot("like-refused")
+        until(Double(10), "the rollback line didn't clear") { self.rollback($0) == nil }
+
+        // A like whose reply is lost after the server made it: kept, settled by a read, made once.
+        f.control("slow?ms=0")
+        let records1 = f.records().count
+        f.control("fail?n=1&kind=lost-after")
+        click(like2)
+        until(1, "the like didn't show at once") { self.on(like2, $0) == true }
+        let end = Date().addingTimeInterval(45)
+        while Date() < end, f.records().count == records1 { Thread.sleep(forTimeInterval: 0.2) }
+        Thread.sleep(forTimeInterval: 35)
+        guard on(like2) == true, rollback(frame) == nil else { fail("the lost like didn't settle as liked") }
+        guard f.records().count == records1 + 1 else { fail("the lost like was made \(f.records().count - records1) times") }
+
+        // Mute an author mid-feed: their posts and reposts are gone, the post being read stays put.
+        wheel(40, 4)
+        fr = until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
+        Thread.sleep(forTimeInterval: 0.3)
+        fr = frame
+        guard let reader = firstShown(fr) else { fail("no post being read") }
+        let byAuthor = authors(fr)
+        // The author with the most posts on screen, not the reader's post's nor the tester's.
+        let count = { (a: String) in byAuthor.values.filter { $0 == a }.count }
+        guard let (mk, muted) = actable(fr).compactMap({ k -> (UInt32, String)? in
+            guard let a = byAuthor[k], a != me, a != byAuthor[reader.key] else { return nil }
+            return (k, a)
+        }).max(by: { count($0.1) < count($1.1) }) else { fail("no other author's post to mute") }
+        let mute = menu(mk).first { $0.control?.claim == 40 }
+        guard let mute, mute.label == "Mute \(muted)" else { fail("no Mute \(muted) in the menu") }
+        let shownBefore = authors(fr).values.filter { $0 == muted }.count
+        shot("before-mute")
+        choose(mute.control!)
+        fr = until(2, "\(muted)'s posts still show") { !self.authors($0).values.contains(muted) }
+        guard let still = firstShown(fr), still.key == reader.key, still.y == reader.y else {
+            fail("the mute moved the reader: \(reader) → \(String(describing: firstShown(fr)))")
+        }
+        guard texts(fr).contains("Muted \(muted). Their posts are hidden.") else { fail("no Muted line") }
+        guard !texts(fr).contains(where: { $0.hasPrefix("Reposted by ") && $0.hasSuffix(String(muted.dropFirst())) }) else {
+            fail("a repost by \(muted) still shows")
+        }
+        shot("muted")
+        Thread.sleep(forTimeInterval: 1.5)
+        guard (f.state()["muted"] as? [Any])?.isEmpty == false else { fail("the mute wasn't made on the server") }
+
+        // Undo (^58): the posts are back, the reader still where they were.
+        click(58)
+        fr = until(5, "Undo didn't bring \(muted)'s posts back") { self.authors($0).values.contains(muted) }
+        guard let back = firstShown(fr), back.key == reader.key, back.y == reader.y else {
+            fail("Undo moved the reader: \(reader) → \(String(describing: firstShown(fr)))")
+        }
+        let end2 = Date().addingTimeInterval(5)
+        while Date() < end2, (f.state()["muted"] as? [Any])?.isEmpty == false { Thread.sleep(forTimeInterval: 0.1) }
+        guard (f.state()["muted"] as? [Any])?.isEmpty == true else { fail("the unmute wasn't made on the server") }
+        shot("unmuted")
+
+        return "liked, unliked, reposted and followed with replies slowed; a refused like rolled back (\"\(line)\"); "
+            + "a lost like settled by a read and made once; muting \(muted) hid their \(shownBefore) posts on screen with the reader kept, Undo brought them back"
+    }
+
     func run() {
         // Files go to the scratch home, never the real one.
         guard ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] != nil else {
@@ -262,6 +442,9 @@ final class Selftest {
         until(5, "no sign-in screen") { self.node(6, $0) != nil && self.node(8, $0)?.value == f.service }
         guard node(10) == nil, node(12) == nil else { fail("Sign in or Cancel offered on an empty form") }
         guard node(7)?.secure == true else { fail("the app password field isn't secure") }
+        guard let so0 = signOutItem(frame), so0.label == "Sign Out", !so0.enabled else {
+            fail("Sign Out isn't in the app menu, greyed, while signed out: \(menuBar(frame).map(\.label))")
+        }
         shot("sign-in")
 
         // A wrong password: said in words, the field emptied.
@@ -372,6 +555,7 @@ final class Selftest {
         // Others keep posting and acting between requests, so a few may be new since.
         click(62)
         until(10, "the unread count didn't drop once the notifications were seen") { (self.unreadOf($0) ?? 0) < unread && self.node(61, $0) != nil }
+        let acts = actsScenario(f)
 
         // Quit and launch again: the session resumes from the Keychain, nothing typed.
         engine?.stop()
@@ -379,12 +563,11 @@ final class Selftest {
         until(15, "the session didn't resume") { self.shows(me, $0) && (self.posts($0) ?? 0) > 0 }
         shot("resumed")
 
-        // Sign out from the account panel: both items forgotten, the account file gone.
-        click(13)
-        until(2, "no account panel") { self.node(11, $0) != nil }
-        shot("account")
-        click(11)
-        until(5, "not signed out") { self.node(6, $0) != nil }
+        // Sign Out from the app menu (^49): both items forgotten, the account file gone.
+        guard let so = signOutItem(frame), so.enabled else { fail("Sign Out not offered in the app menu while signed in") }
+        engine?.send([.menuSelect(place: 48, ControlRef(claim: 49))])
+        let out = until(5, "not signed out") { self.node(6, $0) != nil }
+        guard signOutItem(out)?.enabled == false else { fail("Sign Out still offered once signed out") }
         let end = Date().addingTimeInterval(5)
         while Date() < end, !store.held.isEmpty || FileManager.default.fileExists(atPath: account) {
             Thread.sleep(forTimeInterval: 0.05)
@@ -395,7 +578,7 @@ final class Selftest {
 
         clean()
         print("selftest: PASS (Sky against the fake PDS: wrong password, rate limit, offline and slow sign-ins in words; "
-              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; notifications grouped and marked seen once shown; resumed; "
-              + "Sign out forgot \(items) Keychain items and the account)")
+              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; notifications grouped and marked seen once shown; "
+              + "\(acts); resumed; Sign Out from the app menu forgot \(items) Keychain items and the account)")
     }
 }

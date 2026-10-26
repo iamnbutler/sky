@@ -131,7 +131,7 @@ theorem tidy_reqs (s : State) : (tidy s).2.filterMap reqOf = [] := by
 def signedInTo (s₀ : State) : State :=
   let s := clearOut s₀
   { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
-           problem := none, accountOpen := false, slow := false,
+           problem := none, slow := false,
            session := { s.session with phase := .signingIn s.session.next (serviceOf s),
                                        next := s.session.next + 1 } }
 
@@ -433,7 +433,6 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
   | editPassword op => exact secureField_noSecret _ _
   | editService op => exact field_noSecret _ _
   | nextField => intro e he; simp only [step0, List.mem_singleton] at he; subst he; rfl
-  | toggleAccount => exact noSecret_nil
   | openHelp => exact sendOwn_noSecret _ _ _ rfl
   | appearRow k => exact appearRow_noSecret s k
   | openPost k =>
@@ -442,7 +441,19 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
     · exact sendOwn_noSecret _ _ _ rfl
     · exact noSecret_nil
   | showNew => exact noSecret_nil
-  | act kind k => exact noSecret_nil
+  | act kind k =>
+    simp only [step0, actStep]
+    split
+    · split
+      · intro e he; simp only [List.mem_singleton] at he; subst he; rfl
+      · exact noSecret_nil
+    · exact noSecret_nil
+  | undoMute => exact noSecret_nil
+  | copyLink k =>
+    simp only [step0, Sky.copyLink]
+    split
+    · intro e he; simp only [List.mem_singleton] at he; subst he; rfl
+    · exact noSecret_nil
   | openNotes =>
     simp only [step0, Sky.openNotes]
     rw [startNoteRefresh_dead, markSeenNow_dead]
@@ -490,7 +501,7 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
           rw [e, flushNotes_dead]
           · exact noSecret_append (timers_noSecret (hearSeen_only s .retry).2) noSecret_nil
           · exact live_signedOut h
-        · exact noSecret_nil
+        · split <;> exact noSecret_nil
     | sub sb e =>
       cases e
       case tick =>
@@ -555,7 +566,7 @@ theorem driveSession_keeps (s : State) (i : Session.Input) :
 theorem signOutForgets : SignOutForgets := by
   intro s
   let s0 := clearOut s.blank
-  let t : State := { s0 with problem := none, accountOpen := false }
+  let t : State := { s0 with problem := none }
   have hf : ∀ item, item = accessItem ∨ item = refreshItem →
       ∃ a, Effect.request a (.forgetSecret item) ∈ (s.step .signOut).2 := by
     intro item hi

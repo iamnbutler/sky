@@ -79,6 +79,10 @@ def Kind.collection : Kind → String
   | .follow => nsidFollow
   | .mute => ""
 
+/-- The timer that clears the status line's rollback (and a mute's Undo) after `lineMs`. -/
+def Acts.lineTimer : String := "line"
+def Acts.lineMs : Nat := 8000
+
 /-- What a call Sky made for an act is for. -/
 inductive Req where
   /-- A table's write. -/
@@ -189,6 +193,9 @@ def Acts.isEmpty (a : Acts) : Bool :=
   a.reqs.isEmpty && a.views.isEmpty && a.outbox.isEmpty && a.line.isNone &&
     a.tables.likes.size == 0 && a.tables.reposts.size == 0 && a.tables.follows.size == 0 &&
     a.tables.mutes.size == 0
+
+/-- The status line's rollback cleared (its timer, `lineTimer`). -/
+def Acts.clearLine (a : Acts) : Acts := { a with line := none }
 
 /-! ## What is shown -/
 
@@ -305,7 +312,8 @@ def Acts.performRec (ctx : Ctx) (k : Kind) (a : Acts) : Out String RKey → Acts
   | .rolledBack key r =>
     -- What was asked for is the opposite of what is shown again.
     let w := a.say k key ((a.tables.tableOf k).shown key).isNone r
-    { a with line := some w }.push (.effect (.announce w .high))
+    (({ a with line := some w }.push (.effect (.announce w .high))).push
+      (.effect (.setTimer Acts.lineTimer Acts.lineMs)))
 
 /-- One output of the mutes' table. -/
 def Acts.performMute (a : Acts) : Out String Bool → Acts
@@ -319,7 +327,8 @@ def Acts.performMute (a : Acts) : Out String Bool → Acts
   | .retryIn key ms => a.push (.effect (.setTimer (timerName .mute key) ms))
   | .rolledBack key r =>
     let w := a.say .mute key (!a.tables.mutes.shown key) r
-    { a with line := some w }.push (.effect (.announce w .high))
+    (({ a with line := some w }.push (.effect (.announce w .high))).push
+      (.effect (.setTimer Acts.lineTimer Acts.lineMs)))
 
 /-- Feed a record kind's table and carry out what it asks. -/
 def Acts.feedRec (ctx : Ctx) (a : Acts) (k : Kind) (i : Input String RKey) : Acts :=

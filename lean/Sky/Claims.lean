@@ -17,9 +17,9 @@ meta import Cairn.Claims.Elab
 | ^8 | move | the Service field |
 | ^9 | move | What's an app password? (opens Bluesky's page) |
 | ^10 | move | Sign in: enabled exactly when both fields are typed in and no sign-in is in flight |
-| ^11 | move | Sign out, in the account panel |
+| ^11 | move | Sign out, in the account panel (retired: Sign Out is in the app menu, ^49) |
 | ^12 | move | Cancel a sign-in or resume, offered once it has taken a few seconds |
-| ^13 | move | Account: open or close the account panel |
+| ^13 | move | Account: open or close the account panel (retired with the panel) |
 | ^14 | place | the feed: a virtual list of posts and the end row |
 | ^20 | invariant | the feed is a contiguous run of the server's timeline (retired: cairn_atproto^26) |
 | ^21 | invariant | a stale load-more page changes nothing (retired: cairn_atproto^27) |
@@ -38,17 +38,28 @@ meta import Cairn.Claims.Elab
 | ^34 | invariant | posts keep their keys (retired: reissued as ^46) |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
 | ^36 | invariant | image loads only near the view (retired: reissued as ^47) |
-| ^37 | move | Like or Unlike a post |
-| ^38 | move | Repost or Undo repost |
-| ^39 | move | Follow or Unfollow a post's author |
-| ^40 | move | Mute a post's author, or Unmute on a hidden row |
+| ^37 | move | Like a post: a toggle with its count |
+| ^38 | move | Repost a post: a toggle with its count |
+| ^39 | move | Follow or Unfollow a post's author, in the post's menu |
+| ^40 | move | Mute a post's author, in the post's menu |
 | ^41 | invariant | the acts' tables are calm: a settled like, repost, follow or mute shows the server's; counts through `count` |
-| ^42 | invariant | a muted account's posts appear nowhere |
+| ^42 | invariant | a muted account's posts appear nowhere: their rows lay a point high, keeping their keys |
 | ^43 | invariant | signed out ⇒ the acts hold nothing |
 | ^44 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
 | ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
 | ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
 | ^47 | invariant | image loads only for rows near the view; none signed out |
+| ^48 | place | Sky's menus in the menu bar |
+| ^49 | move | Sign Out, in the app menu |
+| ^50 | place | the View menu |
+| ^51 | move | View ▸ Refresh, ⌘R |
+| ^52 | place | a post's menu: its ⋯ button `^52#k`, and the secondary click on the post |
+| ^53 | move | Copy Link to Post, in a post's menu |
+| ^54 | move | Open on bsky.app, in a post's menu |
+| ^55 | invariant | Like and Repost: on every post that shows exactly when signed in; checked as the table shows |
+| ^56 | invariant | Sign Out is in the app menu, enabled exactly when signed in |
+| ^57 | invariant | a post's menu says Follow or Unfollow, Mute or Unmute, as the tables show |
+| ^58 | move | Undo a mute, in the status line |
 | ^60 | place | the notifications: a virtual list of grouped rows and the end row |
 | ^61 | move | Notifications (with the unread count): show the notifications |
 | ^62 | move | Home: back to the feed |
@@ -150,14 +161,7 @@ move ^10 signInMove (s : State) "Sign in" in ^1 where
     post s' := s'.password = Text.SecureField.empty passwordHint ∧ signingIn s'.session = true
     sound := by intro s h; exact signIn_post h
 
-move ^11 signOutMove (s : State) "Sign out" in ^1 where
-  does "While signed in, open the account panel and press Sign out."
-  sees "Sky signs out: it forgets both Keychain items and the saved account, empties the feed and cancels every request it was waiting on. The sign-in screen shows, the handle still filled in."
-  enabled := live s.session && s.accountOpen
-  on press
-    emit := s.step .signOut
-    post s' := s'.session.phase = .signedOut ∧ s'.feed = {}
-    sound := by intro s _; exact signOut_post s
+retire ^11 move "Sign out" because "Sign Out moved to the app menu and the account panel is gone (cairn#254): reissued as ^49."
 
 move ^12 cancelSignIn (s : State) "Cancel signing in" in ^1 where
   does "While Sky has been signing in or resuming the session for a few seconds, press Cancel."
@@ -168,14 +172,7 @@ move ^12 cancelSignIn (s : State) "Cancel signing in" in ^1 where
     post s' := s'.session.phase = .signedOut ∧ s'.feed = {}
     sound := by intro s _; exact signOut_post s
 
-move ^13 accountMove (s : State) "Account" in ^1 where
-  does "While signed in, press Account (Done when it is open)."
-  sees "The account panel opens, with the handle, the service and Sign out; pressed again, it closes."
-  enabled := live s.session
-  on press
-    emit := s.step .toggleAccount
-    post s' := s'.accountOpen = !s.accountOpen ∧ s'.feed = s.feed
-    sound := by intro s h; exact toggleAccount_post h
+retire ^13 move "Account" because "The account panel held only Sign out, which moved to the app menu (cairn#254, ^49); the header shows who is signed in."
 
 move ^30 reachEnd (s : State) "Reach the end of the feed" in ^14 where
   does "Scroll the feed to its end, while it isn't at the end of the timeline."
@@ -196,17 +193,17 @@ move ^31 retryMore (s : State) "Retry loading more" in ^14 where
     sound := by intro s h; exact loadMore_post (bool_left h)
 
 move ^32 postRowMove (s : State) (k : Nat) "A post" in ^14 where
-  does "Press a post (or Return on it); or scroll it into view."
+  does "Press a post (or Return on it); or scroll it into view. A post hidden by a mute is neither."
   sees "Pressed, the post opens on bsky.app. In view, its avatar and images load (grey until they do, the same size after), and loads for posts far from it are cancelled."
   enabled := canOpenRow s k
   on press
     emit := s.step (.openPost k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session
-    sound := by intro s k h; exact openPost_post (bool_left h) k
+    sound := by intro s k h; exact openPost_post (bool_left (bool_left h)) k
   on appear
     emit := s.step (.appearRow k)
     post s' := s'.feed = s.feed ∧ s'.session = s.session
-    sound := by intro s k h; exact appearRow_post (bool_left h) k
+    sound := by intro s k h; exact appearRow_post (bool_left (bool_left h)) k
 
 move ^33 showNewMove (s : State) "Show new posts" in ^1 where
   does "After a refresh put posts above the one you are reading, press N new posts."
@@ -217,9 +214,18 @@ move ^33 showNewMove (s : State) "Show new posts" in ^1 where
     post s' := s.gen < s'.gen ∧ s'.feed = s.feed
     sound := by intro s h; exact showNew_post (bool_left h)
 
+place ^48 menuBarPlace "Sky's menus" in ^1 where
+  does "Sky's own items in the menu bar: Sign Out at the top of the app menu, and the View menu."
+
+place ^50 viewMenu "The View menu" in ^48 where
+  does "The View menu in the menu bar: Refresh (⌘R)."
+
+place ^52 postMenuPlace "A post's menu" in ^14 where
+  does "A post's ⋯ button opens its menu (a click, Space or Return); the secondary click on the post or on its Like or Repost toggle, Shift-F10 on any of them, or VoiceOver's Show Menu, opens the same menu. It has Follow or Unfollow and Mute for someone else's post, then Copy Link to Post and Open on bsky.app."
+
 move ^37 likeMove (s : State) (k : Nat) "Like a post" in ^14 where
-  does "While signed in, press Like (Unlike once liked) under a post that isn't hidden."
-  sees "The post shows liked (or not) and its like count moves by one in the same frame, everywhere it appears. Sky writes the like record (putRecord with a record key it mints, or deleteRecord); if the server refuses, the post shows what it did before and the status line says why; if the answer is lost, Sky reads the record back before it believes either."
+  does "While signed in, press the Like toggle (♡ and the count) under a post."
+  sees "The post shows liked (♥, selected) or not, and its like count moves by one, in the same frame, everywhere it appears; greyed until the server answers. Sky writes the like record (putRecord with a record key it mints, or deleteRecord); if the server refuses, the post shows what it did before and the status line says why; if the answer is lost, Sky reads the record back before it believes either."
   enabled := canAct s .like k
   on press
     emit := s.step (.act .like k)
@@ -227,8 +233,8 @@ move ^37 likeMove (s : State) (k : Nat) "Like a post" in ^14 where
     sound := by intro s k h it hit; exact act_post h it hit
 
 move ^38 repostMove (s : State) (k : Nat) "Repost a post" in ^14 where
-  does "While signed in, press Repost (Undo repost once reposted) under a post that isn't hidden."
-  sees "The post shows reposted (or not) and its repost count moves by one in the same frame. The write, a refusal and a lost answer go as for Like (^37)."
+  does "While signed in, press the Repost toggle (⇄ and the count) under a post."
+  sees "The post shows reposted (selected) or not, and its repost count moves by one, in the same frame. The write, a refusal and a lost answer go as for Like (^37)."
   enabled := canAct s .repost k
   on press
     emit := s.step (.act .repost k)
@@ -236,8 +242,8 @@ move ^38 repostMove (s : State) (k : Nat) "Repost a post" in ^14 where
       s'.acts.reposted it.post.uri = !s.acts.reposted it.post.uri
     sound := by intro s k h it hit; exact act_post h it hit
 
-move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^14 where
-  does "While signed in, press Follow (Unfollow once following) under someone else's post that isn't hidden."
+move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^52 where
+  does "While signed in, open someone else's post's menu (⋯, or the secondary click on the post) and choose Follow @handle (Unfollow once following)."
   sees "Every post by that account shows Unfollow (or Follow) in the same frame. Sky writes the follow record; a refusal and a lost answer go as for Like (^37)."
   enabled := canAct s .follow k
   on press
@@ -246,9 +252,9 @@ move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^14 where
       s'.acts.following it.post.author.did = !s.acts.following it.post.author.did
     sound := by intro s k h it hit; exact act_post h it hit
 
-move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^14 where
-  does "While signed in, press Mute under someone else's post; on a hidden post, press Unmute."
-  sees "Muted, every post by the account, and every repost by it, is replaced by \"Post from an account you muted\" with Unmute, and a post quoting it says \"Quoted post from an account you muted\", in the same frame. Unmuted, they show again. Sky sends muteActor (or unmuteActor); a refusal shows the posts as they were and says why; a lost answer sends the same mute again until one is answered."
+move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^52 where
+  does "While signed in, open someone else's post's menu (⋯, or the secondary click on the post) and choose Mute @handle."
+  sees "Every post by the account, and every repost by it, is gone from the feed in the same frame, without moving the post you are reading (^42, ^35), and a post quoting it says \"Quoted post from an account you muted\". The status line says \"Muted @handle\" with Undo (^58) for a few seconds. Sky sends muteActor; a refusal brings the posts back and says why; a lost answer sends the same mute again until one is answered."
   enabled := canAct s .mute k
   on press
     emit := s.step (.act .mute k)
@@ -309,6 +315,51 @@ move ^66 noteRowMove (s : State) (k : Nat) "A notification" in ^60 where
     post s' := s.notes.seen.1.mark ≤ s'.notes.seen.1.mark ∧ s'.feed = s.feed
     sound := by intro s k h; exact noteAppear_post (bool_left (bool_left h)) k
 
+move ^49 signOutMenu (s : State) "Sign Out" in ^48 where
+  does "While signed in, choose Sky ▸ Sign Out in the menu bar. It is greyed while signed out."
+  sees "Sky signs out: it forgets both Keychain items and the saved account, empties the feed and cancels every request it was waiting on. The sign-in screen shows, the handle still filled in."
+  enabled := live s.session
+  on press
+    emit := s.step .signOut
+    post s' := s'.session.phase = .signedOut ∧ s'.feed = {}
+    sound := by intro s _; exact signOut_post s
+
+move ^51 refreshMenu (s : State) "Refresh from the View menu" in ^50 where
+  does "While signed in, choose View ▸ Refresh, or press ⌘R. It is greyed while a refresh is in flight or signed out."
+  sees "As Refresh in the header (^4): Sky asks for the head of the feed and stops any load-more in flight."
+  enabled := canRefresh s
+  on press
+    emit := s.step .refresh
+    post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore = none ∧ s'.feed.refresh = some s.nextCall
+    sound := by intro s h; exact refresh_post h
+
+move ^53 copyLinkMove (s : State) (k : Nat) "Copy a post's link" in ^52 where
+  does "Open a post's menu and choose Copy Link to Post."
+  sees "The post's address on bsky.app is on the clipboard. Nothing else changes."
+  enabled := canOpenRow s k
+  on press
+    emit := s.step (.copyLink k)
+    post s' := s'.feed = s.feed ∧ s'.session = s.session ∧ s'.acts.tables.likes = s.acts.tables.likes
+    sound := by intro s k h; exact copyLink_post (bool_left (bool_left h)) k
+
+move ^54 openMenuMove (s : State) (k : Nat) "Open a post on bsky.app" in ^52 where
+  does "Open a post's menu and choose Open on bsky.app."
+  sees "The post opens on bsky.app in the browser, as pressing the post does (^32)."
+  enabled := canOpenRow s k
+  on press
+    emit := s.step (.openPost k)
+    post s' := s'.feed = s.feed ∧ s'.session = s.session
+    sound := by intro s k h; exact openPost_post (bool_left (bool_left h)) k
+
+move ^58 undoMuteMove (s : State) "Undo a mute" in ^1 where
+  does "Just after muting an account from a post's menu, press Undo in the status line (\"Muted @handle. Their posts are hidden.\"). It is offered for a few seconds."
+  sees "The account is unmuted: its posts and reposts show again in the same frame, where they were, and Sky sends unmuteActor."
+  enabled := canUndoMute s
+  on press
+    emit := s.step .undoMute
+    post s' := ∀ d, s.undoMute = some d → s'.acts.muted d = false
+    sound := by intro s h d hd; exact undoMute_post h hd
+
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }
 
@@ -323,9 +374,7 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (typeService.preserves _ fun s _ _ h => hp s _ h)
   (Move.all_cons (appPasswordHelp.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (signInMove.preserves _ fun s _ h => hp s _ h)
-  (Move.all_cons (signOutMove.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (cancelSignIn.preserves _ fun s _ h => hp s _ h)
-  (Move.all_cons (accountMove.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (reachEnd.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (retryMore.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (postRowMove.preserves _ (fun s _ _ h => hp s _ h) fun s _ _ h => hp s _ h)
@@ -334,12 +383,17 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (repostMove.preserves _ fun s _ _ h => hp s _ h)
   (Move.all_cons (followMove.preserves _ fun s _ _ h => hp s _ h)
   (Move.all_cons (muteMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (signOutMenu.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (refreshMenu.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (copyLinkMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (openMenuMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (undoMuteMove.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (notesTab.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (homeTab.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (noteRefreshMove.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (reachNotesEnd.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (retryNotes.preserves _ fun s _ h => hp s _ h)
-  (Move.all_cons (noteRowMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil))))))))))))))))))))))
+  (Move.all_cons (noteRowMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil)))))))))))))))))))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
@@ -451,26 +505,104 @@ invariant ^41 actsSettle "Likes, reposts, follows and mutes settle on the server
   step := fun _ _ _ => actsSound _
   receive := fun _ _ _ => actsSound _
 
-/-- ^42: a muted account's posts appear nowhere. -/
+/-- ^42: a muted account's posts appear nowhere: a row whose author (or reposter) shows muted is
+`hiddenRow`, a point high with no control, and its key stays (the rows are the feed's, ^46); a
+quoted post by a muted account is words. -/
 def MutedHidden : Prop :=
   (∀ (s : State) (it : FeedItem), s.acts.muted it.post.author.did = true → hiddenItem s it = true) ∧
   (∀ (s : State) (ui : UI) (k : Nat) (it : FeedItem), k ≠ 0 → s.rows.item? k = some it →
-    hiddenItem s it = true → rowOf s ui k = mutedRow s ui k) ∧
+    hiddenItem s it = true → rowOf s ui k = hiddenRow) ∧
+  (∀ (s : State) (k : Nat), hiddenAt s k = true → canOpenRow s k = false ∧
+    ∀ kind, canAct s kind k = false) ∧
   (∀ (s : State) (q : QuotedPost), s.acts.muted q.author.did = true →
     quoteLineFor s (.post q) = mutedQuote)
 
 theorem mutedHidden : MutedHidden := by
-  refine ⟨fun s it h => ?_, fun s ui k it hk hit hh => ?_, fun s q h => ?_⟩
+  refine ⟨fun s it h => ?_, fun s ui k it hk hit hh => ?_, fun s k h => ?_, fun s q h => ?_⟩
   · simp only [hiddenItem, h, Bool.true_or]
   · simp only [rowOf, hk, hit, postRow, hh, ↓reduceIte]
+  · unfold hiddenAt at h
+    split at h
+    · next it hit =>
+      refine ⟨by simp [canOpenRow, hiddenAt, hit, h], fun kind => ?_⟩
+      simp only [canAct, hit, h, Bool.not_true, Bool.false_and, Bool.and_false]
+    · cases h
   · simp only [quoteLineFor, h, ↓reduceIte]
 
 invariant ^42 mutedNowhere "A muted account's posts appear nowhere" for machine where
-  does "A post whose author is muted, or a repost by a muted account, shows as one line, \"Post from an account you muted\", with Unmute: the row is built without the post (its text, images, embeds and counts are not read). A quoted post by a muted account shows as \"Quoted post from an account you muted\". Muted means as shown: a mute shows in the step it is pressed (^40)."
+  does "A post whose author is muted, or a repost by a muted account, is gone from the feed: its row lays a point high, with nothing of the post (its text, images, embeds and counts are not read) and no control, so it can't be opened or acted on; it keeps its key, so the post you are reading stays where it is (^35, ^46). A quoted post by a muted account shows as \"Quoted post from an account you muted\". Muted means as shown: a mute shows in the step it is chosen (^40), and Undo (^58) brings the posts back."
   holds _s := MutedHidden
   init := mutedHidden
   step := fun _ _ _ => mutedHidden
   receive := fun _ _ _ => mutedHidden
+
+/-- ^55: on a post that shows, Like and Repost are offered exactly when signed in, each a toggle
+checked as its table shows the post. -/
+def TogglesShown : Prop :=
+  ∀ (s : State) (ui : UI) (k : Nat) (it : FeedItem), s.rows.item? k = some it → hiddenItem s it = false →
+    canAct s .like k = live s.session ∧ canAct s .repost k = live s.session ∧
+    (likeNodes s ui k it).length = (if live s.session then 1 else 0) ∧
+    (repostNodes s ui k it).length = (if live s.session then 1 else 0) ∧
+    (likeControl s k it).checked = some (s.acts.liked it.post.uri) ∧
+    (repostControl s k it).checked = some (s.acts.reposted it.post.uri)
+
+theorem togglesShown : TogglesShown := by
+  intro s ui k it hit hh
+  have hl : canAct s .like k = live s.session := by simp [canAct, hit, hh]
+  have hr : canAct s .repost k = live s.session := by simp [canAct, hit, hh]
+  refine ⟨hl, hr, ?_, ?_, rfl, rfl⟩
+  · simp only [likeNodes, hl]; split <;> simp_all
+  · simp only [repostNodes, hr]; split <;> simp_all
+
+invariant ^55 togglesInvariant "Like and Repost are toggles that show the table" for machine where
+  does "Under every post that shows, Like and Repost are offered exactly when signed in. Each is a toggle whose checked (and selected) state is what the likes' or reposts' table shows for the post (^41), so VoiceOver says \"selected\" when it is on; its count is the view's, less the viewer's own in it, plus what is shown."
+  holds _s := TogglesShown
+  init := togglesShown
+  step := fun _ _ _ => togglesShown
+  receive := fun _ _ _ => togglesShown
+
+/-- ^56: Sign Out is in the app menu, enabled exactly when signed in. -/
+def SignOutInMenu : Prop := ∀ s : State, MenuItem.enabledOf (menuBar s) signOutRef = some (live s.session)
+
+theorem signOutInMenu : SignOutInMenu := fun s => by
+  simp [MenuItem.enabledOf, MenuItem.find, MenuItem.findOf, menuBar, signOutRef]
+
+invariant ^56 signOutMenuInvariant "Sign Out is in the app menu" for machine where
+  does "The app menu has Sign Out in every state, enabled exactly when signed in (greyed otherwise, and choosing it then does nothing)."
+  holds _s := SignOutInMenu
+  init := signOutInMenu
+  step := fun _ _ _ => signOutInMenu
+  receive := fun _ _ _ => signOutInMenu
+
+/-- The label of item `r` of a menu. -/
+def labelOf (items : List MenuItem) (r : ControlRef) : Option String :=
+  (MenuItem.find r items).map (·.1.label)
+
+/-- ^57: a post's menu says Follow or Unfollow, Mute or Unmute, by what the tables show. -/
+def MenuWords : Prop :=
+  ∀ (s : State) (k : Nat) (it : FeedItem),
+    (canAct s .follow k = true →
+      labelOf (postMenu s k it) ⟨39, k⟩ =
+        some (followWords (s.acts.following it.post.author.did) ("@" ++ it.post.author.handle))) ∧
+    (canAct s .mute k = true →
+      labelOf (postMenu s k it) ⟨40, k⟩ =
+        some (muteWords (s.acts.muted (muteTarget s it)) ("@" ++ it.post.author.handle)))
+
+theorem menuWords : MenuWords := by
+  intro s k it
+  constructor
+  · intro h
+    simp [labelOf, postMenu, h, MenuItem.find, MenuItem.findOf]
+  · intro h
+    simp only [labelOf, postMenu, h]
+    split <;> simp [MenuItem.find, MenuItem.findOf]
+
+invariant ^57 menuWordsInvariant "A post's menu says what the tables show" for machine where
+  does "On someone else's post, the post's menu says Follow @handle or Unfollow @handle as the follows' table shows the author, and Mute @handle or Unmute @handle as the mutes' table shows them."
+  holds _s := MenuWords
+  init := menuWords
+  step := fun _ _ _ => menuWords
+  receive := fun _ _ _ => menuWords
 
 invariant ^43 actsGone "Signed out, no acts held" for machine where
   does "Whenever the session isn't signed in, Sky holds no like, repost, follow or mute, no view of a post, no act in flight and no line about one: signing out drops them, and the next account starts from its own server's."
@@ -521,7 +653,7 @@ invariant ^71 pollInvariant "At most one unread poll" for machine where
 def claimInfos : List ClaimInfo := claims%
 
 def app : App State :=
-  { machine.toApp [.window 1 "Sky" view] claimInfos with
+  { machine.toApp [.window 1 "Sky" view, .menuBar 48 menuBar] claimInfos with
     initEffects
     subscriptions
     minSize }

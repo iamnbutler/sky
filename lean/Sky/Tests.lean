@@ -211,12 +211,35 @@ def likeId : Nat := ((requests resumed (.act .like k1)).head?.map (·.1)).getD 0
 /- A second press while the write is out sends nothing more, and shows not liked. -/
 #guard (requests liking (.act .like k1)).isEmpty && !(run liking [.act .like k1]).acts.liked post1.uri
 
-/- Mute: every post by the author hidden at once; muteActor out; Unmute on the row. -/
+/- Refused: the line is announced and set to clear after `lineMs`; the timer clears it. -/
+#guard let r := liking.step (reply likeId (err 400 "InvalidRequest" "no"))
+  (r.2.any fun | .announce t _ => some t == r.1.acts.line | _ => false) &&
+  (r.2.any fun | .setTimer n ms => n == Acts.lineTimer && ms == lineMs | _ => false) &&
+  (run r.1 [.msg (.timer Acts.lineTimer)]).acts.line.isNone
+
+/- Mute: every post by the author hidden at once (their rows a point high, keeping their keys);
+muteActor out; the status line offers Undo, which brings them back. -/
 def muting : State := run resumed [.act .mute k1]
 #guard muting.acts.muted post1.author.did && hiddenItem muting ((muting.rows.item? k1).getD default)
 #guard (requests resumed (.act .mute k1)).map (contains ·.2 "muteActor") == [true]
-#guard canAct muting .mute k1 && !canAct muting .like k1
+#guard !canAct muting .mute k1 && !canAct muting .like k1 && !canOpenRow muting k1
 #guard muting.rows.items.all fun it => it.post.author.did != post1.author.did || hiddenItem muting it
+#guard muting.rows.keys == resumed.rows.keys
+#guard canUndoMute muting && muting.undoMute == some post1.author.did
+#guard (resumed.step (.act .mute k1)).2.any fun | .setTimer n _ => n == Acts.lineTimer | _ => false
+#guard let u := run muting [.undoMute]
+  !u.acts.muted post1.author.did && !hiddenItem u ((u.rows.item? k1).getD default) && !canUndoMute u
+#guard (run muting [.msg (.timer Acts.lineTimer)]).undoMute.isNone
+
+/- The post's menu: Follow and Mute on someone else's post, then Copy Link and Open. -/
+#guard ((postMenu resumed k1 ((resumed.rows.item? k1).getD default)).filterMap fun
+  | .item c .. => some c.ref.claim | _ => none) == [39, 40, 53, 54]
+#guard (resumed.step (.copyLink k1)).2.any fun | .setClipboard u => u == postUrl post1 | _ => false
+
+/- The menu bar: Sign Out enabled exactly when signed in; Refresh with ⌘R. -/
+#guard MenuItem.enabledOf (menuBar resumed) signOutRef == some true
+#guard MenuItem.enabledOf (menuBar initial) signOutRef == some false
+#guard live (run resumed [.signOut]).session == false
 
 /- Signed out: nothing held. -/
 #guard (run liking [.signOut]).acts.isEmpty
