@@ -188,7 +188,7 @@ theorem signIn_requests {s : State} (h : ready s = true) :
   rw [signIn_run h, List.filterMap_append, List.filterMap_append, settle_reqs, tidy_reqs]
   rfl
 
-/-- ^26: the password reaches one request. -/
+/-- ^44: the password reaches one request. -/
 def PasswordSent : Prop :=
   (∀ (s : State) (c : Cmd) (p : Text.SecureField), c ≠ .signIn →
     (s.step c).2 = ({ s with password := p }.step c).2) ∧

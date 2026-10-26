@@ -4,39 +4,34 @@ import Cairn.Fuzz.Text
 
 /-! # Sky on `cairn fuzz`'s host
 
-`cairn fuzz` types in Sky's fields, presses its buttons (sign in, load more, refresh, sign out, the
-app-password link) and plays the host:
-replies late, in any order, to cancelled and stray ids, failing (Cairn's docs/fuzz.md). The
-server is cairn_atproto's fake PDS (`CairnAtproto.Fake`, cairn#208): a timeline that only grows at
-its head, `getTimeline` paged by an opaque cursor, access tokens that expire, refreshes refused,
-a missing Keychain item by the session's phase, and faults. No network, no real account. The
-service default Sky reads at launch (`readDefault`) is the fake's, or none; the saved account
-(`readFile`) is the fake's identifier, or none.
+`cairn fuzz` types in Sky's fields, presses its buttons (sign in, load more, refresh, sign out,
+the app-password link, like, repost, follow, mute) and plays the host: replies late, in any
+order, to cancelled and stray ids, failing (Cairn's docs/fuzz.md).
 
-Cairn 0.2.5's hook keeps no state between replies, so each reply is what the fake answers in a
-state drawn at random that fits request `id`: the timeline as it stands then (`lengthAt`),
-growing as ids grow, and post `k` (from the oldest) the same whenever it is answered.
+The server is cairn_atproto's whole fake PDS (`Fake.server`, cairn#260): every XRPC request
+reaches it, and it holds the tester's repo and mutes through the sequence. Requests fail before
+it acts or are lost after it (retransmit off), and between steps posts arrive, other accounts
+like, repost and follow, the AppView catches up and the access token expires. Half the
+sequences start from the seed the fuzz types (`cfg`), saved signed in half of those; the rest
+from a random seed, saved signed in (`worldGen`). The rest of the host (the saved service and
+account, files, images) is `replies`, from the seed's fake.
 
 The fuzz types into the sign-in form (`edits`): mostly the fake's identifier, app password and
 service, sometimes a wrong password, the password appended to what is there (after the text
 the fuzzer plants in the secure field, which must never reach an effect unredacted), an empty
 service, or Cairn's random editing script.
 
-Every claim is checked after every step: ^24 and ^25 are decidable and checked as states; ^24
-against the runtime's ids (`outstanding`) and once everything is answered (`drained`). The feed
-is cairn_atproto's `Paged` list, whose merges are proved there (`cairn_atproto^26`–`^29`); Sky's
-wiring of it is still checked here, under ^24, against the fake's timeline each step reaches:
-the feed is a contiguous run of it, its cursor the last page's, a stale page changes nothing,
-and a refresh racing a load-more ends the same either way. -/
+Every claim is checked after every step: ^24, ^25 and ^43 are decidable and checked as states;
+^24 against the runtime's ids (`outstanding`) and once everything is answered (`drained`), and
+Sky's wiring of the feed against the server's timeline (`feedOk`). ^41 against the server
+(`actsHeld`, `countsHeld`): every key Sky wrote and holds settled shows what the server holds,
+and a settled like count is the server's whenever no one else acted since the view. -/
 
 namespace Sky.FakeCheck
 
 open Cairn Cairn.Fuzz CairnJson CairnAtproto CairnAtproto.Fake
 
 def cfg : Config := {}
-
-/-- The timeline's length when request `id` is answered (cairn_atproto's README). -/
-def lengthAt (id : Nat) : Nat := cfg.base + arrivedBefore cfg (id + 1)
 
 /-- The saved service, or none. -/
 def readService : Gen Reply := do
@@ -75,49 +70,56 @@ def isRun : List Nat → Bool
   | a :: b :: rest => a == b + 1 && isRun (b :: rest)
   | _ => true
 
-/-- cairn_atproto^26 through Sky: the feed is a contiguous run of the fake's timeline, each post the timeline's own. -/
-def contiguous (f : Feed) : Bool :=
+/-- Strictly newest first. -/
+def isDesc : List Nat → Bool
+  | a :: b :: rest => b < a && isDesc (b :: rest)
+  | _ => true
+
+/-- cairn_atproto^26 through Sky: the feed is a run of the fake's timeline, newest first, each
+post the timeline's own. The fake's timeline leaves out muted accounts' posts as they are muted,
+so a run of it is the posts it showed, in order: not always consecutive. -/
+def contiguous (c : Config) (f : Feed) : Bool :=
   match indices f with
-  | some ns => isRun ns && (f.items.zip ns).all fun (i, k) => i.post.uri == postUri cfg k
+  | some ns => isDesc ns && (f.items.zip ns).all fun (i, k) => i.post.uri == postUri c k
   | none => false
 
 /-- cairn_atproto^28 through Sky: the cursor is the one that came with the last page: the fake's cursor of the
 oldest post, or none (and the end) at post 0. -/
-def cursorOfLast (f : Feed) : Bool :=
+def cursorOfLast (c : Config) (f : Feed) : Bool :=
   match f.items.getLast? with
   | none => true
   | some i => match indexOf i with
     | some 0 => f.cursor.isNone && f.atEnd
-    | some k => f.cursor == some (cursorOf cfg k) && !f.atEnd
+    | some k => (f.cursor == some (cursorOf c k) && !f.atEnd) || (f.cursor.isNone && f.atEnd)
     | none => false
 
-def pageAt (len : Nat) (cur : Option String) : Page FeedItem :=
-  (page cfg len pageSize (cur.bind (cursorPos cfg len))).page
+def pageAt (c : Config) (len : Nat) (cur : Option String) : Page FeedItem :=
+  (page c len pageSize (cur.bind (cursorPos c len))).page
 
 /-- cairn_atproto^27 through Sky: a load-more page for a cursor the feed doesn't hold changes nothing it shows. -/
-def stale (f : Feed) (len : Nat) : Bool :=
+def stale (cf : Config) (f : Feed) (len : Nat) : Bool :=
   match f.loadMore with
   | some (l, c) =>
     let g := { f with cursor := some (c ++ "0") }
-    [some (pageAt len (some c)), some (pageAt len none), none].all fun p =>
+    [some (pageAt cf len (some c)), some (pageAt cf len none), none].all fun p =>
       (g.gotLoadMore l p).content == g.content
   | none => true
 
 /-- cairn_atproto^29 through Sky: a refresh racing a load-more, either order of answers (or failures): the same feed. -/
-def race (f : Feed) (len : Nat) : Bool :=
+def race (cf : Config) (f : Feed) (len : Nat) : Bool :=
   match f.loadMore, f.refresh with
   | some (l, c), some r =>
-    let pls := [some (pageAt len (some c)), none]
-    let prs := [some (pageAt len none), some (pageAt (len + 100) none), none]
+    let pls := [some (pageAt cf len (some c)), none]
+    let prs := [some (pageAt cf len none), some (pageAt cf (len + 100) none), none]
     pls.all fun pl => prs.all fun pr =>
       (f.gotLoadMore l pl).gotRefresh r pr == (f.gotRefresh r pr).gotLoadMore l pl
   | _, _ => true
 
-/-- ^34, as a state: the rows are the feed's posts, keyed by `Rows.make`, from a key above `0`. -/
+/-- ^46, as a state: the rows are the feed's posts, keyed by `Rows.make`, from a key above `0`. -/
 def rowsFollow (s : State) : Bool :=
   s.rows.items == s.feed.items && s.rows == Rows.make s.rows.top s.rows.items && 0 < s.rows.top
 
-/-- ^34, as a step: posts put on top of the posts there (signed in) leave every one of those
+/-- ^46, as a step: posts put on top of the posts there (signed in) leave every one of those
 with its key, and the list the same. -/
 def prependKeeps (t : Transition State) : Bool :=
   let old := t.before.rows.items
@@ -127,7 +129,7 @@ def prependKeeps (t : Transition State) : Bool :=
     t.after.rows.top + n == t.before.rows.top && t.after.gen == t.before.gen
   else true
 
-/-- ^36, as a state: every image load in flight is for an image a row shows; signed out, none
+/-- ^47, as a state: every image load in flight is for an image a row shows; signed out, none
 is, and there are no rows. -/
 def imagesNear (s : State) : Bool :=
   if live s.session then
@@ -141,8 +143,64 @@ def evict (s : State) : Gen SubEvent := do
   if known.isEmpty || (← Gen.chance 1 8) then return .evicted "https://example.invalid/never.png"
   return .evicted (← Gen.elem known)
 
-/-- The timeline as far as the requests the session has sent. -/
-def lengthOf (s : State) : Nat := lengthAt (sessionId s.session.next + 2)
+/-! ## Against the fake PDS as a server (cairn#252)
+
+The world is the whole fake PDS (`Fake.server`): the tester's repo and mutes persist through a
+sequence, replies fail before the server acts or are lost after it, and between steps posts
+arrive, other accounts like, repost and follow, the AppView catches up and the token expires. -/
+
+/-- The feed as the server's timeline has it (^24, through cairn_atproto^26–^29). -/
+def feedOk (s : State) (w : World) : Bool :=
+  let c := w.server.cfg
+  let len := w.server.length
+  contiguous c s.feed && cursorOfLast c s.feed && stale c s.feed len && race c s.feed len
+
+/-- ^41: every key Sky's tables wrote this session and hold settled shows what the server
+holds: the tester's repo for likes, reposts and follows (the PDS's own truth), the mutes. -/
+def actsHeld (s : State) (w : World) : Bool :=
+  let t := s.acts.tables
+  let rec_ok (tb : Cairn.Optimistic.Table String RKey) (truth : String → Bool) : Bool :=
+    tb.entries.toList.all fun (k, e) =>
+      !(e.written && e.phase.isIdle) || ((tb.shown k).isSome == truth k)
+  rec_ok t.likes w.likedBy && rec_ok t.reposts w.repostedBy &&
+    rec_ok t.follows (fun d => (w.server.now.myFollow d).isSome) &&
+    t.mutes.entries.toList.all fun (k, e) =>
+      !(e.written && e.phase.isIdle) || (t.mutes.shown k == w.muted k)
+
+/-- ^41's counts: a post Sky has a view of, whose like settled, shows the server's like count
+whenever no one else liked it or took a like back since the view (its others are the server's). -/
+def countsHeld (s : State) (w : World) : Bool :=
+  s.feed.items.all fun it =>
+    let p := it.post
+    match s.acts.views[p.uri]? with
+    | none => true
+    | some v =>
+      let mine := w.likedBy p.uri
+      let others := w.likeCount p.uri - Cairn.Optimistic.ind mine
+      !(s.acts.tables.likes.settled p.uri && s.acts.tables.likes.written p.uri &&
+          v.likes - Cairn.Optimistic.ind v.liked.isSome == others) ||
+        s.acts.likeCount p == w.likeCount p.uri
+
+/-- A world for a sequence. Half start from the seed the fuzz types (`cfg`'s identifier and
+password), saved signed in half of those; the rest from a random seed, saved signed in, since
+their password can't be typed. -/
+def worldGen : Gen World := do
+  let w ← Fake.worldGen {}
+  if ← Gen.chance 1 2 then
+    let w0 := World.init { w.server.cfg with seed := cfg.seed }
+    if ← Gen.chance 1 2 then return w0.saved
+    return w0
+  return w.saved
+
+/-- Like, repost, follow and mute pressed often, so their writes race; Sign out only once a
+page is in, and seldom, like Cancel, since a world whose password can't be typed stays signed
+out after them. -/
+def weights (s : State) (r : ControlRef) : Nat :=
+  if r.claim == 37 || r.claim == 38 then 6
+  else if r.claim == 39 || r.claim == 40 then 3
+  else if r.claim == 11 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)
+  else if r.claim == 12 || r.claim == 13 then 1
+  else 2
 
 end Sky.FakeCheck
 
@@ -157,10 +215,8 @@ def fuzz : Cairn.Fuzz.Custom State where
     | .writeFile .. | .deleteFile _ | .openItem _ | .forgetSecret _ => some do
       if ← Gen.chance 1 10 then return .failed .other "The fuzz's host failed it."
       return .done
-    | .http _ url .. => some do
-      -- A load-more fails one time in four, so Retry (^31) gets pressed.
-      if (url.splitOn "cursor=").length > 1 && (← Gen.chance 1 4) then
-        return .failed .network "The fuzz's host dropped the connection."
+    | .http .. => some do
+      -- Images: the fake's (`Fake.server` answers only XRPC).
       match CairnAtproto.Fake.replies FakeCheck.cfg { phase := fun s => some s.session.phase } s id r with
       | some g => g
       | none => return .failed .other "not the fake's"
@@ -169,13 +225,10 @@ def fuzz : Cairn.Fuzz.Custom State where
       | some g => g
       | none => return .failed .other "not the fake's"
   relations :=
-    [ (24, fun t => decide (Inv t.after) && FakeCheck.contiguous t.after.feed &&
-        FakeCheck.cursorOfLast t.after.feed &&
-        FakeCheck.stale t.after.feed (FakeCheck.lengthOf t.after) &&
-        FakeCheck.race t.after.feed (FakeCheck.lengthOf t.after)),
+    [ (24, fun t => decide (Inv t.after)),
       (25, fun t => decide (SignedOutEmpty t.after)),
-      (34, fun t => FakeCheck.rowsFollow t.after && FakeCheck.prependKeeps t),
-      (36, fun t => FakeCheck.imagesNear t.after) ]
+      (46, fun t => FakeCheck.rowsFollow t.after && FakeCheck.prependKeeps t),
+      (47, fun t => FakeCheck.imagesNear t.after) ]
   subEvents := fun s sb => match sb with
     | .imageCache _ => some (FakeCheck.evict s)
     | _ => none
@@ -187,7 +240,12 @@ def fuzz : Cairn.Fuzz.Custom State where
   -- Cairn 0.5.0's presence check counts a list that left as hidden for good, so after a refresh
   -- (a new list ref) the controls in the new list's rows fail it (cairn#268, fixed for 0.5.1).
   -- Until that release, the row moves are exempt from presence; drop this with the bump.
-  noControl := [30, 31, 32]
+  noControl := [30, 31, 32, 37, 38, 39, 40]
+  weights := FakeCheck.weights
+  server := some { CairnAtproto.Fake.server (S := State) {}
+      [(24, FakeCheck.feedOk), (41, FakeCheck.actsHeld), (41, FakeCheck.countsHeld)]
+      [(41, FakeCheck.actsHeld)] with
+    init := FakeCheck.worldGen }
   outstanding := [(24, fun s ids => ids.mergeSort == s.waiting.mergeSort)]
   drained := [(24, fun s => s.feed.loadMore.isNone && s.feed.refresh.isNone &&
     s.session.inflight.isEmpty && s.session.held.isEmpty && s.own.isEmpty && s.forgetting.isEmpty &&

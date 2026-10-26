@@ -29,15 +29,15 @@ meta import Cairn.Claims.Elab
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
 | ^26 | invariant | the password reaches one request (retired: reissued as ^28) |
 | ^27 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^29) |
-| ^28 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
-| ^29 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^28 | invariant | the password reaches one request (retired: reissued as ^44) |
+| ^29 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^45) |
 | ^30 | move | the end of the feed comes into view: load more |
 | ^31 | move | Retry, after a load-more failed |
 | ^32 | move | a post: press to open it on bsky.app; in view, its images load |
 | ^33 | move | "N new posts": back to the top |
-| ^34 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^34 | invariant | posts keep their keys (retired: reissued as ^46) |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
-| ^36 | invariant | image loads only for rows near the view; none signed out |
+| ^36 | invariant | image loads only near the view (retired: reissued as ^47) |
 | ^37 | move | Like or Unlike a post |
 | ^38 | move | Repost or Undo repost |
 | ^39 | move | Follow or Unfollow a post's author |
@@ -45,6 +45,10 @@ meta import Cairn.Claims.Elab
 | ^41 | invariant | the acts' tables are calm: a settled like, repost, follow or mute shows the server's; counts through `count` |
 | ^42 | invariant | a muted account's posts appear nowhere |
 | ^43 | invariant | signed out ⇒ the acts hold nothing |
+| ^44 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
+| ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^47 | invariant | image loads only for rows near the view; none signed out |
 -/
 
 @[expose] public section
@@ -294,14 +298,18 @@ retire ^26 invariant "The password reaches one request" because "Sky's step gain
 
 retire ^27 invariant "Signed out, no secret" because "Sky's step gained the feed's rows and images (cairn#211), so the statement's step is a new one: reissued as ^29."
 
-invariant ^28 passwordOnce "The password reaches one request" for machine where
+retire ^28 invariant "The password reaches one request" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^44."
+
+invariant ^44 passwordOnce "The password reaches one request" for machine where
   does "Every step but Sign in (the button, or Enter in the password field) has the same effects whatever the password field holds. Sign in's effects are the same too, for any password of the same length, once the redacted request's contents are blanked; with Sign in enabled its only request is createSession, carrying the password and marked redact, and the field is empty after. So the password is sent in exactly one request, and never shown by a tool (Cairn redacts it in dumps and logs; the fuzzer plants text in the field and checks)."
   holds _s := PasswordSent
   init := passwordSent
   step := fun _ _ _ => passwordSent
   receive := fun _ _ _ => passwordSent
 
-invariant ^29 signOutSecrets "Signed out, no secret" for machine where
+retire ^29 invariant "Signed out, no secret" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^45."
+
+invariant ^45 signOutSecrets "Signed out, no secret" for machine where
   does "Sign out's effects include forgetting both Keychain items (access and refresh). While signed out, no step sends a request carrying a Keychain secret."
   holds _s := SignOutForgets ∧ SignedOutNoSecret
   init := ⟨signOutForgets, signedOutNoSecret⟩
@@ -311,7 +319,9 @@ invariant ^29 signOutSecrets "Signed out, no secret" for machine where
 theorem rowsFollow_step (s : State) (c : Cmd) (h : RowsFollow s) : RowsFollow (s.step c).1 :=
   step_follows s c h.2
 
-invariant ^34 rowsFollow "Posts keep their keys" for machine where
+retire ^34 invariant "Posts keep their keys" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^46."
+
+invariant ^46 rowsFollow "Posts keep their keys" for machine where
   does "The rows of the list are the feed's posts in its order, keyed from a first key up, with the end row's key 0 last and never a post's. Posts a refresh puts on top take the keys below the first; every post already there keeps its key and the list stays the same one, so the reader's post is found where it was; they are counted as new posts until they come into view. A feed replaced or emptied starts a new list, at the top."
   holds s := RowsFollow s ∧ PrependKeeps
   init := ⟨follows_initial, prependKeeps⟩
@@ -336,13 +346,15 @@ theorem anchorKept : AnchorKept := fun info r pad o lim kids _ _ hk hc =>
   VList.record_keeps info r pad o lim kids hk hc
 
 invariant ^35 anchor "The post you are reading stays still" for machine where
-  does "When a refresh puts posts above the post at the top of the view (^34 keeps its key), or heights above it are corrected, the runtime moves the offset by exactly as much as that post moved, so it stays where it was on screen, unless the offset is clamped. At the very top too: the new posts land above the view, and N new posts (^33) offers them. Checked by the fuzzer at every step."
+  does "When a refresh puts posts above the post at the top of the view (^46 keeps its key), or heights above it are corrected, the runtime moves the offset by exactly as much as that post moved, so it stays where it was on screen, unless the offset is clamped. At the very top too: the new posts land above the view, and N new posts (^33) offers them. Checked by the fuzzer at every step."
   holds _s := AnchorKept
   init := anchorKept
   step := fun _ _ _ => anchorKept
   receive := fun _ _ _ => anchorKept
 
-invariant ^36 imagesNearInvariant "Image loads only near the view" for machine where
+retire ^36 invariant "Image loads only near the view" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^47."
+
+invariant ^47 imagesNearInvariant "Image loads only near the view" for machine where
   does "When a post comes into view, every image load still in flight is for a post within 12 rows of it: loads for posts scrolled far away are cancelled. Signed out, no image load is in flight and there are no rows. At most 6 requests are with the host at once (Cairn's maxInFlight, Runtime.step_cap)."
   holds _s := ImagesNear
   init := imagesNear

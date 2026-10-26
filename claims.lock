@@ -22,12 +22,23 @@
 25	invariant	active	6deffe07f8725085	Signed out, nothing shown or in flight
 26	invariant	retired	ac99b103d9a655ae	The password reaches one request
 27	invariant	retired	4a44c424ddf0f802	Signed out, no secret
-28	invariant	active	9c8c94ba19c4917b	The password reaches one request
-29	invariant	active	92acca994d0fd08f	Signed out, no secret
+28	invariant	retired	9c8c94ba19c4917b	The password reaches one request
+29	invariant	retired	92acca994d0fd08f	Signed out, no secret
 30	move	active	2a16a8ea696c683f	Reach the end of the feed
 31	move	active	3a7be099a7ce6e33	Retry loading more
 32	move	active	e7e14b75b63d0e90	A post
 33	move	active	8c6f44420467177e	Show new posts
-34	invariant	active	f38dbd8ba58d946b	Posts keep their keys
+34	invariant	retired	f38dbd8ba58d946b	Posts keep their keys
 35	invariant	active	b09d72a09d49dd01	The post you are reading stays still
-36	invariant	active	d306d24e1e0e4cde	Image loads only near the view
+36	invariant	retired	d306d24e1e0e4cde	Image loads only near the view
+37	move	active	2b643cb31f2adf89	Like a post
+38	move	active	7902c244b1861eea	Repost a post
+39	move	active	d4b20668b228d85a	Follow a post's author
+40	move	active	df5d00f388475804	Mute an account
+41	invariant	active	b726421e8e92e831	Likes, reposts, follows and mutes settle on the server's
+42	invariant	active	c5d8f7d72671fd0e	A muted account's posts appear nowhere
+43	invariant	active	615c935da1bb928e	Signed out, no acts held
+44	invariant	active	29011d263df29d36	The password reaches one request
+45	invariant	active	e309ece8b5b093b0	Signed out, no secret
+46	invariant	active	7ece59d42494545b	Posts keep their keys
+47	invariant	active	6899da2d1d01210f	Image loads only near the view

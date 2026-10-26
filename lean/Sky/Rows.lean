@@ -5,12 +5,12 @@ public import Sky.Secrets
 /-! # The rows and the images: what every step keeps
 
 * `RowsFollow`: after every step the rows are the feed's items, the keys are `top`, `top + 1`, …
-  then the end row's `0`, and `top` is never `0`, so no post's key is the end row's (^34).
+  then the end row's `0`, and `top` is never `0`, so no post's key is the end row's (^46).
 * `prepend_keeps`: posts put on top of the feed take the keys below the first; every post already
   there keeps its key and the list stays the same (`gen`), so the runtime's anchor finds the
-  reader's post where it was (^34, with Cairn's `VList.record_keeps`, ^35).
+  reader's post where it was (^46, with Cairn's `VList.record_keeps`, ^35).
 * `ImagesNear`: when a row comes into view, every image load still in flight is for a row within
-  `span` rows of it; signed out, none is, and there are no rows (^36). -/
+  `span` rows of it; signed out, none is, and there are no rows (^47). -/
 
 @[expose] public section
 
@@ -133,7 +133,7 @@ theorem settle_dead (s : State) (h : live (settle s).1.session = false) : (settl
   · next hl => simp only [hl, ↓reduceIte] at h; exact absurd h (by simp)
   · rfl
 
-/-! ## The rows follow the feed (^34) -/
+/-! ## The rows follow the feed (^46) -/
 
 /-- The rows as `Rows.make` builds them, from a first key that isn't the end row's. -/
 def Rows.WF (r : Rows) : Prop := r = Rows.make r.top r.items ∧ 0 < r.top
@@ -145,7 +145,7 @@ theorem baseTop_pos : 0 < baseTop := by decide
 
 theorem Rows.wf_empty : ({} : Rows).WF := ⟨rfl, baseTop_pos⟩
 
-/-- ^34's first half: the rows are the feed's items, keyed `top`, `top + 1`, … and `0` last. -/
+/-- ^46's first half: the rows are the feed's items, keyed `top`, `top + 1`, … and `0` last. -/
 def RowsFollow (s : State) : Prop := s.rows.items = s.feed.items ∧ s.rows.WF
 
 theorem change_same {old new : List FeedItem} (h : change old new = .same) : new = old := by
@@ -186,7 +186,7 @@ theorem step_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (s.step 
 
 theorem follows_initial : RowsFollow initial := ⟨rfl, Rows.wf_empty⟩
 
-/-- ^34's second half: `n` posts put on top of rows that follow the feed take the `n` keys
+/-- ^46's second half: `n` posts put on top of rows that follow the feed take the `n` keys
 below the first, every post already there keeps its key, the list stays the same, and the
 new posts are counted. -/
 def PrependKeeps : Prop :=
@@ -222,7 +222,7 @@ theorem prependKeeps : PrependKeeps := by
   rw [he, change_prepend ho hn]
   simp [hlt]
 
-/-! ## Image loads (^36) -/
+/-! ## Image loads (^47) -/
 
 theorem pending_load (t : Images) (id : Nat) (src : String) (p : Nat × String)
     (h : p ∈ (t.load id src).1.pending) : p ∈ t.pending ∨ p.2 = src := by
@@ -284,7 +284,7 @@ theorem appearRow_pending (s : State) (k i : Nat) (hi : s.rows.index? k = some i
     · next it hit => exact row_near s.rows i it hit span _ h
     · cases h
 
-/-- ^36: when the row with key `k` (row `i`) comes into view, every image load in flight is for a
+/-- ^47: when the row with key `k` (row `i`) comes into view, every image load in flight is for a
 row within `span` rows of it; and after any step that leaves Sky signed out, no load is in flight
 and there are no rows. -/
 def ImagesNear : Prop :=

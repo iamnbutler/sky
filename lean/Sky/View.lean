@@ -281,39 +281,44 @@ def actsRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
      one .mute 40 "Mute" ("Mute " ++ h))
 
 /-- A row hidden because its author, or its reposter, is muted (^42): the words and Unmute,
-nothing of the post. -/
+nothing of the post. The words are the row's own control (^32); Unmute sits beside it, since a
+control can't hold another. -/
 def mutedRow (s : State) (ui : UI) (k : Nat) : Node :=
   let r : ControlRef := ⟨32, k⟩
-  .box { width := .fill, background := some white, border := ring ui r }
-      (some { ref := r, role := .listItem, appear := true, label := mutedWords })
-    [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 12, 14⟩, gap := 10, align := .center } none
-        ([ .box { width := .fill, height := .fixed lineH, clip := true } none
-            [.text { font := { size := 13 }, color := muted } mutedWords] ] ++
+  .box { width := .fill, background := some white } none
+    [ .box { axis := .row, width := .fill, padding := ⟨0, 14, 0, 0⟩, gap := 10, align := .center } none
+        ([ .box { width := .fill, padding := ⟨12, 0, 12, 14⟩, border := ring ui r }
+              (some { ref := r, role := .listItem, appear := true, label := mutedWords })
+            [ .box { width := .fill, height := .fixed lineH, clip := true } none
+                [.text { font := { size := 13 }, color := muted } mutedWords] ] ] ++
          (if canAct s .mute k then [actLink ui 40 k "Unmute" "Unmute the account"] else [])),
       .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
-/-- A post: the avatar, then who and when, the text, the images, other embeds and the counts.
-The whole row opens the post (^32); it tells Sky when it comes into view, to load its images. -/
+/-- A post: the avatar, then who and when, the text, the images, other embeds and the counts,
+which together open the post (^32) and tell Sky when they come into view, to load the images;
+then the acts (^37–^40), outside that control, since a control can't hold another. -/
 def postRow (s : State) (ui : UI) (k : Nat) (it : FeedItem) : Node :=
   if hiddenItem s it then mutedRow s ui k else
   let p := it.post
   let r : ControlRef := ⟨32, k⟩
-  .box { width := .fill, background := some (if ui.hover = some r then ⟨248, 248, 250, 255⟩ else white),
-         border := ring ui r } (some { ref := r, role := .listItem, appear := true,
-                                       label := "Post by @" ++ p.author.handle })
-    [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 12, 14⟩, gap := 10 } none
-        [ avatar s p.author,
-          .box { width := .fill, gap := 5 } none
-            (contextLines it ++
-             [ .box { axis := .row, width := .fill, height := .fixed lineH, gap := 6, align := .center,
-                      clip := true } none
-                 [ .text { font := { size := 14, weight := 600 }, color := ink } (displayName p.author),
-                   .text { font := { size := 13 }, color := muted } ("@" ++ p.author.handle),
-                   .text { font := { size := 13 }, color := muted } ("· " ++ relTime s.now p.createdAt) ] ] ++
-             (if p.text.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} p.text]) ++
-             images s (thumbsOf p.embed) ++
-             (embedLines s p.embed).map embedLine ++
-             [textLine (countsLine s p) muted 12, actsRow s ui k it]) ] ,
+  let bg : Color := if ui.hover = some r then ⟨248, 248, 250, 255⟩ else white
+  .box { width := .fill, background := some bg } none
+    [ .box { width := .fill, border := ring ui r }
+        (some { ref := r, role := .listItem, appear := true, label := "Post by @" ++ p.author.handle })
+        [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 6, 14⟩, gap := 10 } none
+            [ avatar s p.author,
+              .box { width := .fill, gap := 5 } none
+                (contextLines it ++
+                 [ .box { axis := .row, width := .fill, height := .fixed lineH, gap := 6, align := .center,
+                          clip := true } none
+                     [ .text { font := { size := 14, weight := 600 }, color := ink } (displayName p.author),
+                       .text { font := { size := 13 }, color := muted } ("@" ++ p.author.handle),
+                       .text { font := { size := 13 }, color := muted } ("· " ++ relTime s.now p.createdAt) ] ] ++
+                 (if p.text.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} p.text]) ++
+                 images s (thumbsOf p.embed) ++
+                 (embedLines s p.embed).map embedLine ++
+                 [textLine (countsLine s p) muted 12]) ] ],
+      .box { width := .fill, padding := ⟨0, 14, 10, 64⟩ } none [actsRow s ui k it],
       .box { width := .fill, height := .fixed 1, background := some line } none [] ]
 
 def endH : Nat := 64

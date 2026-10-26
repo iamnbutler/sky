@@ -19,6 +19,13 @@ Loading…, "Couldn't load more." with Retry, or "You're all caught up." Refresh
 above without moving the reader, and offers "↑ N new posts" to go back to the top. Images load
 for rows near the view (at most 6 at a time) and are cancelled as the reader moves away.
 
+Under each post (cairn#252): Like, Repost, Follow (on others' posts) and Mute. A press shows in
+the same frame, everywhere the post or account appears, counts included; Sky then writes the
+record (or mutes) and settles on the server's answer: a refusal shows what was there before and
+says why in the status line; a lost answer is read back from the account's own repo before it
+is believed. A muted account's posts, and its reposts, show as "Post from an account you muted"
+with Unmute; a post quoting it says "Quoted post from an account you muted".
+
 ## The model (`lean/Sky`)
 
 - `Feed`: cairn_atproto's paged list of timeline items (`Paged FeedItem`): the items shown
@@ -31,6 +38,12 @@ for rows near the view (at most 6 at a time) and are cancelled as the reader mov
   out, expiry and token refresh) and routes its answers to the feed. A refresh withdraws the
   load-more in flight (`cancelRequest`); whenever the session isn't signed in, the feed is
   emptied and every call withdrawn.
+- `Acts`: likes, reposts, follows and mutes, each a `Cairn.Optimistic` table (cairn's
+  docs/optimistic.md) keyed by post URI or DID. A press sets the table and mints a record key
+  (`TidClock`); the table's writes and read-backs become session calls (`putRecord`,
+  `deleteRecord`, `getRecord`, `muteActor`, `unmuteActor`), queued and sent in the same step
+  (`flush` in `Model`); answers go back through `WriteOutcome` and `ReadBack`. Every page's
+  posts and accounts are `seen`, and a post's counts are the newest view's through `count`.
 - `Proofs`, `SessionFacts`: what every step keeps, and the moves' posts. `Secrets`: the app
   password reaches exactly one request, redacted, and is cleared as it is sent; signed out, no
   request carries a Keychain secret; Sign out forgets both items.
@@ -60,21 +73,36 @@ for rows near the view (at most 6 at a time) and are cancelled as the reader mov
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
 | ^26 | invariant | the password reaches one request (retired: reissued as ^28) |
 | ^27 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^29) |
-| ^28 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
-| ^29 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^28 | invariant | the password reaches one request (retired: reissued as ^44) |
+| ^29 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^45) |
 | ^30 | move | the end of the feed comes into view: load more |
 | ^31 | move | Retry, after a load-more failed |
 | ^32 | move | a post: press to open it on bsky.app; in view, its images load |
 | ^33 | move | "N new posts": back to the top |
-| ^34 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^34 | invariant | posts keep their keys (retired: reissued as ^46) |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
-| ^36 | invariant | image loads only for rows near the view; none signed out |
+| ^36 | invariant | image loads only near the view (retired: reissued as ^47) |
+| ^37 | move | Like or Unlike a post |
+| ^38 | move | Repost or Undo repost |
+| ^39 | move | Follow or Unfollow a post's author |
+| ^40 | move | Mute a post's author, or Unmute on a hidden row |
+| ^41 | invariant | likes, reposts, follows and mutes settle on the server's; counts through `count` |
+| ^42 | invariant | a muted account's posts appear nowhere |
+| ^43 | invariant | signed out ⇒ the acts hold nothing |
+| ^44 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
+| ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^47 | invariant | image loads only for rows near the view; none signed out |
 
 ## Checking
 
 `make check`: build, lint, axiom audit, ledger, kernel replay, the selftest, `cairn fuzz`
 against cairn_atproto's fake PDS (`CairnAtproto.Fake`), size and claims. No network and no real
-account. The fuzz types into the form and plays the fake as its host. The selftest
+account. The fuzz types into the form and runs the whole fake PDS as its server
+(`Fake.server`): likes, reposts, follows and mutes persist through a sequence, replies fail
+before the server acts or are lost after it, other accounts act and the AppView lags; after
+every step each settled like, repost, follow and mute Sky wrote, and each settled like count,
+is checked against what the server holds. The selftest
 (`Sources/Sky/Selftest.swift`, needs [Bun](https://bun.sh)) runs the fake's HTTP server on
 127.0.0.1 and drives the app through Cairn's engine: a wrong password, a rate limit, offline and
 a slow sign-in, each in words; then signs in by typing, waits for images, scrolls with the wheel,

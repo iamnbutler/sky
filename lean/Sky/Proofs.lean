@@ -1131,8 +1131,8 @@ theorem settle_actsGone (t : State) : ActsGone (settle t).1 := by
   intro h
   rw [settle_fst] at h ⊢
   by_cases hl : live t.session = true
-  · rw [ite_cond_eq_true _ _ (eq_true hl), hl] at h; exact absurd h (by decide)
-  · rw [ite_cond_eq_false _ _ (eq_false hl)]; rfl
+  · rw [ite_eq_left_of_eq_true _ _ (eq_true hl), hl] at h; exact absurd h (by decide)
+  · rw [ite_eq_right_of_eq_false _ _ (eq_false hl)]; rfl
 
 theorem step_actsGone (s : State) (c : Cmd) : ActsGone (s.step c).1 := by
   rcases step_cases s c with e | e <;> rw [e]
