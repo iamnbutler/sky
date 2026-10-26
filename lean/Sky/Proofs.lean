@@ -23,10 +23,8 @@ open Cairn CairnAtproto CairnAtproto.Session
 
 /-! ## The invariants -/
 
-/-- A feed that isn't at its end holds a cursor (^22). -/
-def CursorKept (f : Feed) : Prop := f.atEnd = false → f.items ≠ [] → f.cursor.isSome = true
-
-instance (f : Feed) : Decidable (CursorKept f) := by unfold CursorKept; infer_instance
+/-- A feed that isn't at its end holds a cursor: cairn_atproto's `Paged.CursorKept` (cairn_atproto^28). -/
+abbrev CursorKept (f : Feed) : Prop := Paged.CursorKept f
 
 /-- The load-more in flight is `pending`, asked from the feed's cursor, of a non-empty feed. -/
 def LmOk (pending : Nat → Prop) (s : State) : Prop :=
@@ -98,60 +96,25 @@ theorem Q.inv {s : State} (h : Q [] s) : Inv s :=
 
 /-! ## The feed's handlers -/
 
-theorem cursorKept_empty : CursorKept ({} : Feed) := fun _ h => absurd rfl h
+theorem cursorKept_empty : CursorKept ({} : Feed) := Paged.cursorKept_empty
 
-theorem cursorKept_append (f : Feed) (p : FeedPage) : CursorKept (f.appendPage p) := by
-  intro h _
-  simp only [Feed.appendPage] at h ⊢
-  cases hc : p.cursor <;> simp_all
+theorem cursorKept_gotLoadMore {f : Feed} (h : CursorKept f) (id : Nat)
+    (p : Option (Page FeedItem)) : CursorKept (f.gotLoadMore id p) :=
+  Paged.cursorKept_gotLoadMore h id p
 
-theorem cursorKept_replace (f : Feed) (p : FeedPage) : CursorKept (f.replaceBy p) := by
-  intro h _
-  simp only [Feed.replaceBy] at h ⊢
-  cases hc : p.cursor <;> simp_all
+theorem cursorKept_gotRefresh {f : Feed} (h : CursorKept f) (id : Nat)
+    (p : Option (Page FeedItem)) : CursorKept (f.gotRefresh id p) :=
+  Paged.cursorKept_gotRefresh h id p
 
-theorem cursorKept_headPage {f : Feed} (h : CursorKept f) (p : FeedPage) :
-    CursorKept (f.headPage p) := by
-  unfold Feed.headPage
-  split
-  · next new hn =>
-    intro ha _
-    have hne : f.items ≠ [] := by
-      intro e; simp [e, newOnTop] at hn
-    exact h ha hne
-  · exact cursorKept_replace f p
-
-theorem cursorKept_gotLoadMore {f : Feed} (h : CursorKept f) (id : Nat) (p : Option FeedPage) :
-    CursorKept (f.gotLoadMore id p) := by
-  unfold Feed.gotLoadMore
-  split
-  · split
-    · split
-      · split
-        · exact cursorKept_append _ _
-        · exact h
-      · exact h
-    · exact h
-  · exact h
-
-theorem cursorKept_gotRefresh {f : Feed} (h : CursorKept f) (id : Nat) (p : Option FeedPage) :
-    CursorKept (f.gotRefresh id p) := by
-  unfold Feed.gotRefresh
-  split
-  · split
-    · exact cursorKept_headPage (f := { f with refresh := none }) h _
-    · exact h
-  · exact h
-
-@[simp] theorem gotLoadMore_refresh (f : Feed) (id : Nat) (p : Option FeedPage) :
+@[simp] theorem gotLoadMore_refresh (f : Feed) (id : Nat) (p : Option (Page FeedItem)) :
     (f.gotLoadMore id p).refresh = f.refresh := by
-  unfold Feed.gotLoadMore
+  unfold Paged.gotLoadMore
   repeat' split
   all_goals rfl
 
 theorem gotLoadMore_lm {f : Feed} {l : Nat} {c : String} (hl : f.loadMore = some (l, c))
-    (p : Option FeedPage) : (f.gotLoadMore l p).loadMore = none := by
-  unfold Feed.gotLoadMore
+    (p : Option (Page FeedItem)) : (f.gotLoadMore l p).loadMore = none := by
+  unfold Paged.gotLoadMore
   rw [hl]
   dsimp only
   rw [ite_eq_left_of_eq_true _ _ (eq_self l)]
@@ -160,8 +123,8 @@ theorem gotLoadMore_lm {f : Feed} {l : Nat} {c : String} (hl : f.loadMore = some
   · rfl
 
 theorem gotLoadMore_other {f : Feed} {id : Nat} (h : ∀ c, f.loadMore ≠ some (id, c))
-    (p : Option FeedPage) : f.gotLoadMore id p = f := by
-  unfold Feed.gotLoadMore
+    (p : Option (Page FeedItem)) : f.gotLoadMore id p = f := by
+  unfold Paged.gotLoadMore
   split
   · next l c e =>
     split
@@ -169,34 +132,34 @@ theorem gotLoadMore_other {f : Feed} {id : Nat} (h : ∀ c, f.loadMore ≠ some 
     · rfl
   · rfl
 
-theorem gotRefresh_refresh {f : Feed} {id : Nat} (h : f.refresh = some id) (p : Option FeedPage) :
+theorem gotRefresh_refresh {f : Feed} {id : Nat} (h : f.refresh = some id) (p : Option (Page FeedItem)) :
     (f.gotRefresh id p).refresh = none := by
-  unfold Feed.gotRefresh
+  unfold Paged.gotRefresh
   simp only [h, ↓reduceIte]
   split
-  · unfold Feed.headPage; split <;> rfl
+  · unfold Paged.headPage; split <;> rfl
   · rfl
 
-theorem gotRefresh_other {f : Feed} {id : Nat} (h : f.refresh ≠ some id) (p : Option FeedPage) :
+theorem gotRefresh_other {f : Feed} {id : Nat} (h : f.refresh ≠ some id) (p : Option (Page FeedItem)) :
     f.gotRefresh id p = f := by
-  simp [Feed.gotRefresh, h]
+  simp [Paged.gotRefresh, h]
 
 /-- After a refresh's answer, a load-more still in flight is the one before, the cursor is the
 same and the items no fewer. -/
-theorem gotRefresh_lm {f : Feed} {id : Nat} {p : Option FeedPage} {x : Nat × String}
+theorem gotRefresh_lm {f : Feed} {id : Nat} {p : Option (Page FeedItem)} {x : Nat × String}
     (h : (f.gotRefresh id p).loadMore = some x) :
     f.loadMore = some x ∧ (f.gotRefresh id p).cursor = f.cursor ∧
       (f.items ≠ [] → (f.gotRefresh id p).items ≠ []) := by
-  unfold Feed.gotRefresh at *
+  unfold Paged.gotRefresh at *
   by_cases hr : f.refresh = some id
   · simp only [hr, ite_true] at h ⊢
     cases p with
     | none => exact ⟨h, by simp, fun x => x⟩
     | some q =>
       simp only at h ⊢
-      unfold Feed.headPage at *
-      cases hn : newOnTop f.items q.feed with
-      | none => simp [hn, Feed.replaceBy] at h
+      unfold Paged.headPage at *
+      cases hn : newOnTop f.items q.items with
+      | none => simp [hn, Paged.replaceBy] at h
       | some new =>
         simp only [hn] at h ⊢
         refine ⟨h, by simp, fun hne => ?_⟩

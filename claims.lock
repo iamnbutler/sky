@@ -3,31 +3,31 @@
 1	place	active	-	Sky window
 2	move	retired	ba7d8b90a8b037f7	Sign in
 3	move	retired	d237a538a4f6fb20	Load more
-4	move	active	f4d7067707b2a3d2	Refresh
+4	move	active	ca3a711f5b125bde	Refresh
 5	move	retired	161725456253d644	Sign out
 6	move	active	5928a27bfa96792b	Type your handle or email
 7	move	active	6be3a9a690ed133c	Type your app password
 8	move	active	4e1c8868d4fcefe9	Type the service
 9	move	active	f46dd4d0ede92eb8	What's an app password?
 10	move	active	e8985a9abb7a20f9	Sign in
-11	move	active	d5046f2a54bfb39f	Sign out
-12	move	active	9fb8586bc04301cb	Cancel signing in
-13	move	active	b97aa26476e6e4c4	Account
+11	move	active	19ec06e1048bc5f7	Sign out
+12	move	active	9b57085a43dec333	Cancel signing in
+13	move	active	a8e444646a18b08b	Account
 14	place	active	-	The feed
-20	invariant	active	41facd6a71c257b3	The feed is a run of the timeline
-21	invariant	active	5ab8697de51482ac	A stale page changes nothing
-22	invariant	active	91606c3835166fce	The cursor is never lost
-23	invariant	active	ad3e14c80604f156	A refresh racing a load-more
+20	invariant	retired	41facd6a71c257b3	The feed is a run of the timeline
+21	invariant	retired	5ab8697de51482ac	A stale page changes nothing
+22	invariant	retired	91606c3835166fce	The cursor is never lost
+23	invariant	retired	ad3e14c80604f156	A refresh racing a load-more
 24	invariant	active	62815f3f0fb3326f	Requests in flight are accounted for
-25	invariant	active	3efa62dad23fd6a2	Signed out, nothing shown or in flight
+25	invariant	active	6deffe07f8725085	Signed out, nothing shown or in flight
 26	invariant	retired	ac99b103d9a655ae	The password reaches one request
 27	invariant	retired	4a44c424ddf0f802	Signed out, no secret
-28	invariant	active	4d4fc01d47440f3b	The password reaches one request
-29	invariant	active	7eae90c0e25bda9b	Signed out, no secret
-30	move	active	c248dc5bd68f349a	Reach the end of the feed
-31	move	active	7c36f8c6bd954b80	Retry loading more
-32	move	active	8d80101d7f518614	A post
-33	move	active	343f8e762c919111	Show new posts
-34	invariant	active	b1fd2877fcda0107	Posts keep their keys
+28	invariant	active	9c8c94ba19c4917b	The password reaches one request
+29	invariant	active	92acca994d0fd08f	Signed out, no secret
+30	move	active	2a16a8ea696c683f	Reach the end of the feed
+31	move	active	3a7be099a7ce6e33	Retry loading more
+32	move	active	e7e14b75b63d0e90	A post
+33	move	active	8c6f44420467177e	Show new posts
+34	invariant	active	f38dbd8ba58d946b	Posts keep their keys
 35	invariant	active	b09d72a09d49dd01	The post you are reading stays still
-36	invariant	active	11c406c0fb9b2fb4	Image loads only near the view
+36	invariant	active	d306d24e1e0e4cde	Image loads only near the view

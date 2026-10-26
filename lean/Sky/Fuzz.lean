@@ -22,9 +22,12 @@ service, sometimes a wrong password, the password appended to what is there (aft
 the fuzzer plants in the secure field, which must never reach an effect unredacted), an empty
 service, or Cairn's random editing script.
 
-Every claim is checked after every step: ^22, ^24, ^25 are decidable and checked as states;
-^20–^23 also as relations on the feed each step reaches, against the fake's timeline; ^24 against
-the runtime's ids (`outstanding`) and once everything is answered (`drained`). -/
+Every claim is checked after every step: ^24 and ^25 are decidable and checked as states; ^24
+against the runtime's ids (`outstanding`) and once everything is answered (`drained`). The feed
+is cairn_atproto's `Paged` list, whose merges are proved there (`cairn_atproto^26`–`^29`); Sky's
+wiring of it is still checked here, under ^24, against the fake's timeline each step reaches:
+the feed is a contiguous run of it, its cursor the last page's, a stale page changes nothing,
+and a refresh racing a load-more ends the same either way. -/
 
 namespace Sky.FakeCheck
 
@@ -72,13 +75,13 @@ def isRun : List Nat → Bool
   | a :: b :: rest => a == b + 1 && isRun (b :: rest)
   | _ => true
 
-/-- ^20: the feed is a contiguous run of the fake's timeline, each post the timeline's own. -/
+/-- cairn_atproto^26 through Sky: the feed is a contiguous run of the fake's timeline, each post the timeline's own. -/
 def contiguous (f : Feed) : Bool :=
   match indices f with
   | some ns => isRun ns && (f.items.zip ns).all fun (i, k) => i.post.uri == postUri cfg k
   | none => false
 
-/-- ^22, fuzzed: the cursor is the one that came with the last page: the fake's cursor of the
+/-- cairn_atproto^28 through Sky: the cursor is the one that came with the last page: the fake's cursor of the
 oldest post, or none (and the end) at post 0. -/
 def cursorOfLast (f : Feed) : Bool :=
   match f.items.getLast? with
@@ -88,10 +91,10 @@ def cursorOfLast (f : Feed) : Bool :=
     | some k => f.cursor == some (cursorOf cfg k) && !f.atEnd
     | none => false
 
-def pageAt (len : Nat) (cur : Option String) : FeedPage :=
-  page cfg len pageSize (cur.bind (cursorPos cfg len))
+def pageAt (len : Nat) (cur : Option String) : Page FeedItem :=
+  (page cfg len pageSize (cur.bind (cursorPos cfg len))).page
 
-/-- ^21: a load-more page for a cursor the feed doesn't hold changes nothing it shows. -/
+/-- cairn_atproto^27 through Sky: a load-more page for a cursor the feed doesn't hold changes nothing it shows. -/
 def stale (f : Feed) (len : Nat) : Bool :=
   match f.loadMore with
   | some (l, c) =>
@@ -100,7 +103,7 @@ def stale (f : Feed) (len : Nat) : Bool :=
       (g.gotLoadMore l p).content == g.content
   | none => true
 
-/-- ^23: a refresh racing a load-more, either order of answers (or failures): the same feed. -/
+/-- cairn_atproto^29 through Sky: a refresh racing a load-more, either order of answers (or failures): the same feed. -/
 def race (f : Feed) (len : Nat) : Bool :=
   match f.loadMore, f.refresh with
   | some (l, c), some r =>
@@ -166,11 +169,10 @@ def fuzz : Cairn.Fuzz.Custom State where
       | some g => g
       | none => return .failed .other "not the fake's"
   relations :=
-    [ (20, fun t => FakeCheck.contiguous t.after.feed),
-      (21, fun t => FakeCheck.stale t.after.feed (FakeCheck.lengthOf t.after)),
-      (22, fun t => FakeCheck.cursorOfLast t.after.feed),
-      (23, fun t => FakeCheck.race t.after.feed (FakeCheck.lengthOf t.after)),
-      (24, fun t => decide (Inv t.after)),
+    [ (24, fun t => decide (Inv t.after) && FakeCheck.contiguous t.after.feed &&
+        FakeCheck.cursorOfLast t.after.feed &&
+        FakeCheck.stale t.after.feed (FakeCheck.lengthOf t.after) &&
+        FakeCheck.race t.after.feed (FakeCheck.lengthOf t.after)),
       (25, fun t => decide (SignedOutEmpty t.after)),
       (34, fun t => FakeCheck.rowsFollow t.after && FakeCheck.prependKeeps t),
       (36, fun t => FakeCheck.imagesNear t.after) ]
