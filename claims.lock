@@ -36,32 +36,46 @@
 39	move	active	cc53cc291a0de3e5	Follow a post's author
 40	move	active	0259131b911e6062	Mute an account
 41	invariant	active	0c965c594e57dcae	Likes, reposts, follows and mutes settle on the server's
-42	invariant	active	9df4ce683f8dd6fa	A muted account's posts appear nowhere
+42	invariant	active	36da632e83dc6bcf	A muted account's posts appear nowhere
 43	invariant	active	08185208874361b1	Signed out, no acts held
-44	invariant	active	1a714d01f0263502	The password reaches one request
-45	invariant	active	398fa769cea8ae66	Signed out, no secret
-46	invariant	active	a870c95e307df0ed	Posts keep their keys
-47	invariant	active	63e2bbb91980a85c	Image loads only near the view
+44	invariant	active	6b25a6f92433dea7	The password reaches one request
+45	invariant	active	4d1f3c2daf927ebf	Signed out, no secret
+46	invariant	active	44a375d741bd66a1	Posts keep their keys
+47	invariant	active	7afa197554bfdbd3	Image loads only near the view
 48	place	active	-	Sky's menus
 49	move	active	5eaf49128a4321af	Sign Out
 50	place	active	-	The View menu
-51	move	active	9c040623dd28c042	Refresh from the View menu
+51	move	active	4ae7dc9eaa6439f3	Refresh from the View menu
 52	place	active	-	A post's menu
 53	move	active	ac20522010e26d67	Copy a post's link
 54	move	active	f6c4aa50073e8c27	Open a post on bsky.app
 55	invariant	active	99d4e72bcf818aa0	Like and Repost are toggles that show the table
-56	invariant	active	b8fe512f2f00b9ed	Sign Out is in the app menu
+56	invariant	active	d7dbc70062f72e24	Sign Out is in the app menu
 57	invariant	active	10ac594258db9b5e	A post's menu says what the tables show
 58	move	active	2c017d2214edd36b	Undo a mute
 60	place	active	-	The notifications
-61	move	active	77b2e63c5b63e900	Notifications
-62	move	active	9a57075e4f69490b	Home
+61	move	active	e4719024245d2ef9	Notifications
+62	move	active	f549cc3d0f81a531	Home
 63	move	active	d2e0fe863403580b	Refresh the notifications
 64	move	active	c6b6154e75842402	Reach the end of the notifications
 65	move	active	376b86a1e259248c	Retry loading more notifications
-66	move	active	675bf80573c14903	A notification
+66	move	active	598938e4ca0de03c	A notification
 67	invariant	active	9ed72eaef6800e48	The notifications are a run of the server's
 68	invariant	active	bb9fd2ea5cc8bc53	The groups partition the notifications
 69	invariant	active	66be052a24b61c43	No row from a muted account
-70	invariant	active	ee2712c3f9c95971	Seen only once on screen
-71	invariant	active	053d9dced28e7bb1	At most one unread poll
+70	invariant	active	294eed452c55fa2b	Seen only once on screen
+71	invariant	active	0d36a22d79a2f76e	At most one unread poll
+72	place	active	-	The Go menu
+73	move	active	882530568d7f2075	Go to Home
+74	move	active	eb3cbca46db97a03	Go to Notifications
+75	move	active	b79dc6385b2efee5	Show new notifications
+76	move	active	d3df33cd62b58259	Like a notification's post
+77	move	active	0e9c11470fd9fea0	Repost a notification's post
+78	place	active	-	A notification's menu
+79	move	active	f57e32888bca074a	Follow a notification's author
+80	move	active	d43731bf51c4020a	Mute a notification's author
+81	move	active	5bda5ef188834e52	Copy a notification's link
+82	move	active	7b6ec446cda90010	Open a notification on bsky.app
+83	move	active	52b14347fda63595	Follow back
+84	invariant	active	7ccaa53d9cf3a14a	Each list keeps its place while the other shows
+85	invariant	active	1560ca5faf03bdc8	The tab's count and the Dock badge are the unread count

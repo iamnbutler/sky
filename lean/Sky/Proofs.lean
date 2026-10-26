@@ -94,20 +94,27 @@ theorem Q.inv {s : State} (h : Q [] s) : Inv s :=
   ⟨h.rids, lmOk_mono (fun x hx => hx.resolve_right (answered_nil x)) h.lm,
    rfOk_mono (fun x hx => hx.resolve_right (answered_nil x)) h.rf, h.dis, h.cur⟩
 
-/-! ## The notes' answers touch only the notes and the problem line -/
+/-! ## The notes' answers touch only the notes, the problem line and the act tables -/
 
-/-- `t` is `s` but for its notes and its problem line. -/
+/-- `t` is `s` but for its notes, its problem line and its act tables (a page of notifications
+tells the tables who the user follows; a post's view, what it has liked). -/
 def NotesOnly (s t : State) : Prop :=
-  ∃ (n : Notes) (p : Option String), t = { s with notes := n, problem := p }
+  ∃ (n : Notes) (p : Option String) (a : Acts), t = { s with notes := n, problem := p, acts := a }
 
-theorem NotesOnly.refl (s : State) : NotesOnly s s := ⟨s.notes, s.problem, rfl⟩
+theorem NotesOnly.refl (s : State) : NotesOnly s s := ⟨s.notes, s.problem, s.acts, rfl⟩
 
 theorem NotesOnly.trans {a b c : State} (h1 : NotesOnly a b) (h2 : NotesOnly b c) :
     NotesOnly a c := by
-  obtain ⟨n1, p1, rfl⟩ := h1; obtain ⟨n2, p2, rfl⟩ := h2; exact ⟨n2, p2, rfl⟩
+  obtain ⟨n1, p1, a1, rfl⟩ := h1; obtain ⟨n2, p2, a2, rfl⟩ := h2; exact ⟨n2, p2, a2, rfl⟩
 
 theorem NotesOnly.with (s : State) (n : Notes) (p : Option String) :
-    NotesOnly s { s with notes := n, problem := p } := ⟨n, p, rfl⟩
+    NotesOnly s { s with notes := n, problem := p } := ⟨n, p, s.acts, rfl⟩
+
+theorem NotesOnly.withActs (s : State) (n : Notes) (p : Option String) (a : Acts) :
+    NotesOnly s { s with notes := n, problem := p, acts := a } := ⟨n, p, a, rfl⟩
+
+theorem NotesOnly.notesActs (s : State) (n : Notes) (a : Acts) :
+    NotesOnly s { s with notes := n, acts := a } := ⟨n, s.problem, a, rfl⟩
 
 /-- Effects that are all timers. -/
 def Timers (es : List Effect) : Prop := ∀ e ∈ es, ∃ n ms, e = .setTimer n ms
@@ -146,22 +153,54 @@ theorem hear_after (s : State) (n : Notes) (p : Option String) (e : SeenEv) :
       Timers (hearSeen { s with notes := n, problem := p } e).2 :=
   ⟨(NotesOnly.with s n p).trans (hearSeen_only _ e).1, (hearSeen_only _ e).2⟩
 
+theorem hear_afterActs (s : State) (n : Notes) (p : Option String) (a : Acts) (e : SeenEv) :
+    NotesOnly s (hearSeen { s with notes := n, problem := p, acts := a } e).1 ∧
+      Timers (hearSeen { s with notes := n, problem := p, acts := a } e).2 :=
+  ⟨(NotesOnly.withActs s n p a).trans (hearSeen_only _ e).1, (hearSeen_only _ e).2⟩
+
+theorem hear_afterNA (s : State) (n : Notes) (a : Acts) (e : SeenEv) :
+    NotesOnly s (hearSeen { s with notes := n, acts := a } e).1 ∧
+      Timers (hearSeen { s with notes := n, acts := a } e).2 :=
+  ⟨(NotesOnly.notesActs s n a).trans (hearSeen_only _ e).1, (hearSeen_only _ e).2⟩
+
 theorem noteAnswer_only (s : State) (id : Nat) (a : Answer) :
     NotesOnly s (noteAnswer s id a).1 ∧ Timers (noteAnswer s id a).2 := by
   unfold noteAnswer
-  repeat' (first | (dsimp only; done) | split | (dsimp only; split) | intro)
-  all_goals first
-    | exact ⟨NotesOnly.with _ _ _, timers_nil⟩
-    | exact hear_after _ _ _ _
-    | exact ⟨NotesOnly.refl _, timers_nil⟩
+  split
+  dsimp only
+  split
+  · split
+    · exact hear_afterActs _ _ _ _ _
+    · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+  split
+  · split
+    · exact hear_afterActs _ _ _ _ _
+    · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+  split
+  · split
+    · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+    · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+  split
+  · split
+    · split
+      · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+      · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+    · exact ⟨NotesOnly.withActs _ _ _ _, timers_nil⟩
+  split
+  · split
+    · exact hear_afterActs _ _ _ _ _
+    · split
+      · exact hear_afterActs _ _ _ _ _
+      · exact hear_afterActs _ _ _ _ _
+  · exact ⟨NotesOnly.refl _, timers_nil⟩
 
 theorem Q.notesOnly {rest : List Out} {s t : State} (h : Q rest s) (ht : NotesOnly s t) :
     Q rest t := by
-  obtain ⟨n, p, rfl⟩ := ht
+  obtain ⟨n, p, a, rfl⟩ := ht
   exact ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
 
 theorem Inv.notesOnly {s t : State} (h : Inv s) (ht : NotesOnly s t) : Inv t := by
-  obtain ⟨n, p, rfl⟩ := ht
+  obtain ⟨n, p, a, rfl⟩ := ht
   exact ⟨h.rids, h.lm, h.rf, h.dis, h.cur⟩
 
 /-! ## The feed's handlers -/
@@ -633,10 +672,24 @@ theorem startPoll_inv {s : State} (h : Inv s) : Inv (startPoll s).1 := by
   · exact noteCall_inv h _ _
   · exact h.notesOnly (NotesOnly.with _ _ s.problem)
 
+theorem foldl_sendPosts_inv : ∀ (us : List (List String)) (acc : State × List Effect),
+    Inv acc.1 → Inv (us.foldl sendPosts acc).1
+  | [], _, h => h
+  | u :: us, acc, h => foldl_sendPosts_inv us _ (by unfold sendPosts; exact noteCall_inv h _ _)
+
 theorem flushNotes_inv {s : State} (h : Inv s) : Inv (flushNotes s).1 := by
   unfold flushNotes; split
-  · have h1 := foldl_sendSeen_inv s.notes.todo ({ s with notes := { s.notes with todo := [] } }, [])
+  · have h0 := foldl_sendPosts_inv (chunksOf maxGetPosts s.notes.postsDue)
+      ({ s with notes := { s.notes with postsDue := [] } }, [])
       (h.notesOnly (NotesOnly.with _ _ s.problem))
+    generalize (chunksOf maxGetPosts s.notes.postsDue).foldl sendPosts
+      ({ s with notes := { s.notes with postsDue := [] } }, []) = r at h0 ⊢
+    obtain ⟨s₀, e₀⟩ := r
+    have h1 := foldl_sendSeen_inv s₀.notes.todo ({ s₀ with notes := { s₀.notes with todo := [] } }, [])
+      (Inv.notesOnly h0 (NotesOnly.with _ _ s₀.problem))
+    dsimp only
+    generalize s₀.notes.todo.foldl sendSeen ({ s₀ with notes := { s₀.notes with todo := [] } }, []) = q at h1 ⊢
+    obtain ⟨s₁, e₁⟩ := q
     dsimp only; split
     · exact startPoll_inv h1
     · exact h1
@@ -712,8 +765,30 @@ theorem step0_inv {s : State} (h : Inv s) (c : Cmd) : Inv (step0 s c).1 := by
   | copyLink k =>
     simp only [step0, Sky.copyLink]
     split <;> exact h
-  | openNotes => exact openNotes_inv h
-  | openHome => exact h.other rfl rfl rfl
+  | openNotes =>
+    simp only [step0]; split
+    · exact h.notesOnly (NotesOnly.with _ _ s.problem)
+    · exact openNotes_inv h
+  | openHome =>
+    simp only [step0]; split
+    · exact h.other rfl rfl rfl
+    · exact h.other rfl rfl rfl
+  | noteShowNew => exact h.notesOnly (NotesOnly.with _ _ s.problem)
+  | noteAct kind k =>
+    simp only [step0, noteActStep]
+    split
+    · split
+      · exact h.notesOnly (NotesOnly.withActs _ s.notes s.problem _)
+      · exact h.notesOnly (NotesOnly.withActs _ s.notes s.problem _)
+    · exact h
+  | noteOpen k =>
+    simp only [step0, Sky.noteOpen]
+    split
+    · exact sendOwn_inv h _ _
+    · exact h
+  | noteCopy k =>
+    simp only [step0, Sky.noteCopy]
+    split <;> exact h
   | noteRefresh => exact startNoteRefresh_inv h
   | noteMore => exact startNoteMore_inv h
   | noteAppear k => exact noteAppear_inv h k
@@ -777,11 +852,11 @@ theorem settle_signedOut (s : State) : SignedOutEmpty (settle s).1 := by
   · next hl => intro h; simp_all
   · intro _; exact ⟨rfl, rfl, rfl⟩
 
-/-- `tidy` changes only the rows, the list's generation, the new posts, the load-more's failure
-and the images. -/
-theorem tidy_shape (s : State) : ∃ r g f m im,
-    (tidy s).1 = { s with rows := r, gen := g, fresh := f, moreFailed := m, images := im } := by
-  unfold tidy restart
+/-- `tidyRows` changes only the rows, the list's generation, the new posts, the load-more's
+failure and the images. -/
+theorem tidyRows_shape (s : State) : ∃ r g f m im,
+    (tidyRows s).1 = { s with rows := r, gen := g, fresh := f, moreFailed := m, images := im } := by
+  unfold tidyRows restart
   split
   · split
     · exact ⟨s.rows, s.gen, s.fresh, s.moreFailed, s.images, rfl⟩
@@ -794,6 +869,22 @@ theorem tidy_shape (s : State) : ∃ r g f m im,
     · exact ⟨_, _, _, _, _, rfl⟩
   · exact ⟨_, s.gen, _, _, _, rfl⟩
 
+/-- `dock` changes only what it last sent and where it last put the lists. -/
+theorem dock_fst (s : State) : (dock s).1 = { s with
+    unreadSent := s.notes.unreadShown,
+    feedAimed := if feedAim s then s.gen else s.feedAimed,
+    notesAimed := if notesAim s then s.notes.gen else s.notesAimed } := rfl
+
+/-- `tidy` changes only the rows, the list's generation, the new posts, the load-more's failure,
+the images and what `dock` keeps. -/
+theorem tidy_shape (s : State) : ∃ r g f m im u fa na,
+    (tidy s).1 = { s with rows := r, gen := g, fresh := f, moreFailed := m, images := im,
+                          unreadSent := u, feedAimed := fa, notesAimed := na } := by
+  obtain ⟨r, g, f, m, im, e⟩ := tidyRows_shape s
+  show ∃ r g f m im u fa na, (dock (tidyRows s).1).1 = _
+  rw [dock_fst, e]
+  exact ⟨_, _, _, _, _, _, _, _, rfl⟩
+
 structure Core (s t : State) : Prop where
   session : t.session = s.session
   feed : t.feed = s.feed
@@ -805,7 +896,7 @@ structure Core (s t : State) : Prop where
   tab : t.tab = s.tab
 
 theorem tidy_core (s : State) : Core s (tidy s).1 := by
-  obtain ⟨r, g, f, m, im, e⟩ := tidy_shape s
+  obtain ⟨r, g, f, m, im, u, fa, na, e⟩ := tidy_shape s
   rw [e]; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 theorem tidy_inv {s : State} (h : Inv s) : Inv (tidy s).1 :=
@@ -934,7 +1025,7 @@ theorem handleOut_same (acc : State × List Effect) (o : Out) : Same acc.1 (hand
   | answer id a =>
     show Same acc.1 (answerCall acc.1 id a).1
     unfold answerCall; split
-    · obtain ⟨n, p, e⟩ := (noteAnswer_only acc.1 id a).1
+    · obtain ⟨n, p, a, e⟩ := (noteAnswer_only acc.1 id a).1
       rw [e]; exact ⟨rfl, rfl, rfl⟩
     · exact onAnswer_same _ _ _
   | event e => cases e <;> first | exact ⟨rfl, rfl, rfl⟩ | (rename_i x; cases x <;> exact ⟨rfl, rfl, rfl⟩)
@@ -1304,7 +1395,7 @@ theorem signOut_post (s : State) :
 /-! ## Acting (^37–^40) -/
 
 theorem tidy_acts (t : State) : (tidy t).1.acts = t.acts := by
-  obtain ⟨r, g, f, m, im, e⟩ := tidy_shape t
+  obtain ⟨r, g, f, m, im, u, fa, na, e⟩ := tidy_shape t
   rw [e]
 
 theorem actPress_session (s : State) (kind : Kind) (k : Nat) : (actPress s kind k).session = s.session := by

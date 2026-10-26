@@ -36,7 +36,7 @@ theorem onAnswer0_rows (s : State) (id : Nat) (a : Answer) : (onAnswer0 s id a).
 theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows :=
   onAnswer0_rows s id a
 theorem NotesOnly.rows {s t : State} (h : NotesOnly s t) : t.rows = s.rows := by
-  obtain ⟨n, p, rfl⟩ := h; rfl
+  obtain ⟨n, p, a, rfl⟩ := h; rfl
 
 theorem sendOwn_rows (s : State) (k : Own) (r : Request) : (sendOwn s k r).1.rows = s.rows := rfl
 
@@ -98,12 +98,25 @@ theorem startPoll_rows (s : State) : (startPoll s).1.rows = s.rows := by
   · exact noteCall_rows _ _ _
   · rfl
 
+theorem foldl_sendPosts_rows : ∀ (us : List (List String)) (acc : State × List Effect),
+    (us.foldl sendPosts acc).1.rows = acc.1.rows
+  | [], _ => rfl
+  | u :: us, acc => (foldl_sendPosts_rows us _).trans (by unfold sendPosts; exact noteCall_rows _ _ _)
+
 theorem flushNotes_rows (s : State) : (flushNotes s).1.rows = s.rows := by
   unfold flushNotes; split
-  · have h1 := foldl_sendSeen_rows s.notes.todo ({ s with notes := { s.notes with todo := [] } }, [])
-    dsimp only; split
-    · exact (startPoll_rows _).trans h1
-    · exact h1
+  · have h0 := foldl_sendPosts_rows (chunksOf maxGetPosts s.notes.postsDue)
+      ({ s with notes := { s.notes with postsDue := [] } }, [])
+    generalize (chunksOf maxGetPosts s.notes.postsDue).foldl sendPosts
+      ({ s with notes := { s.notes with postsDue := [] } }, []) = r at h0 ⊢
+    obtain ⟨s₀, e₀⟩ := r
+    have h1 := foldl_sendSeen_rows s₀.notes.todo ({ s₀ with notes := { s₀.notes with todo := [] } }, [])
+    dsimp only
+    generalize s₀.notes.todo.foldl sendSeen ({ s₀ with notes := { s₀.notes with todo := [] } }, []) = q at h1 ⊢
+    obtain ⟨s₁, e₁⟩ := q
+    dsimp only at h0 h1 ⊢; split
+    · exact (startPoll_rows _).trans (h1.trans h0)
+    · exact h1.trans h0
   · rfl
 
 theorem hearSeen_rows (s : State) (e : SeenEv) : (hearSeen s e).1.rows = s.rows :=
@@ -155,7 +168,22 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
   | refresh => exact startRefresh_rows s
   | signOut => exact driveSession_rows _ _
   | appearRow k => exact (appearRow_core s k).2.2.2.2
-  | openNotes => exact openNotes_rows s
+  | openNotes =>
+    simp only [step0]; split
+    · rfl
+    · exact openNotes_rows s
+  | openHome => simp only [step0]; split <;> rfl
+  | noteAct kind k =>
+    simp only [step0, noteActStep]
+    split
+    · split <;> rfl
+    · rfl
+  | noteOpen k =>
+    simp only [step0, Sky.noteOpen]
+    split <;> rfl
+  | noteCopy k =>
+    simp only [step0, Sky.noteCopy]
+    split <;> rfl
   | noteRefresh => exact startNoteRefresh_rows s
   | noteMore => exact startNoteMore_rows s
   | noteAppear k => exact noteAppear_rows s k
@@ -227,6 +255,13 @@ theorem Rows.wf_make {top : Nat} (h : 0 < top) (items : List FeedItem) : (Rows.m
 
 theorem baseTop_pos : 0 < baseTop := by decide
 
+theorem altTop_pos : 0 < altTop := by decide
+
+theorem nextTop_pos (s : State) : 0 < nextTop s := by
+  unfold nextTop; split
+  · exact baseTop_pos
+  · exact altTop_pos
+
 theorem Rows.wf_empty : ({} : Rows).WF := ⟨rfl, baseTop_pos⟩
 
 /-- ^46's first half: the rows are the feed's items, keyed `top`, `top + 1`, … and `0` last. -/
@@ -240,19 +275,27 @@ theorem change_same {old new : List FeedItem} (h : change old new = .same) : new
     · cases h
     · split at h <;> cases h
 
+/-- `dock` leaves the rows, the feed, the generation and the new posts. -/
+theorem dock_keeps (x : State) : (dock x).1.rows = x.rows ∧ (dock x).1.feed = x.feed ∧
+    (dock x).1.gen = x.gen ∧ (dock x).1.fresh = x.fresh := ⟨rfl, rfl, rfl, rfl⟩
+
 theorem tidy_follows (t : State) (hw : t.rows.WF) (hd : live t.session = false → t.feed = {}) :
     RowsFollow (tidy t).1 := by
-  unfold tidy restart
+  show RowsFollow (dock (tidyRows t).1).1
+  unfold RowsFollow
+  rw [(dock_keeps _).1, (dock_keeps _).2.1]
+  show RowsFollow (tidyRows t).1
+  unfold tidyRows restart
   split
   · split
     · next hs => exact ⟨(change_same hs).symm, hw⟩
     · split
       · next n _ hn => exact ⟨rfl, Rows.wf_make (by omega) _⟩
-      · exact ⟨rfl, Rows.wf_make baseTop_pos _⟩
+      · exact ⟨rfl, Rows.wf_make (nextTop_pos _) _⟩
     · split
-      · exact ⟨rfl, Rows.wf_make baseTop_pos _⟩
+      · exact ⟨rfl, Rows.wf_make (nextTop_pos _) _⟩
       · exact ⟨rfl, Rows.wf_make hw.2 _⟩
-    · exact ⟨rfl, Rows.wf_make baseTop_pos _⟩
+    · exact ⟨rfl, Rows.wf_make (nextTop_pos _) _⟩
   · next hl =>
     simp only [Bool.not_eq_true] at hl
     exact ⟨by rw [hd hl], Rows.wf_empty⟩
@@ -301,7 +344,9 @@ theorem change_prepend {old new : List FeedItem} (ho : old ≠ []) (hn : new ≠
 
 theorem prependKeeps : PrependKeeps := by
   intro t new hl ho hn he hlt
-  unfold tidy
+  show (dock (tidyRows t).1).1.rows = _ ∧ (dock (tidyRows t).1).1.gen = _ ∧ (dock (tidyRows t).1).1.fresh = _
+  rw [(dock_keeps _).1, (dock_keeps _).2.2.1, (dock_keeps _).2.2.2]
+  unfold tidyRows
   simp only [hl, ↓reduceIte]
   rw [he, change_prepend ho hn]
   simp [hlt]
@@ -332,7 +377,8 @@ theorem loadSources_pending : ∀ (s : State) (srcs : List String) (p : Nat × S
 
 theorem tidy_pending (t : State) (p : Nat × String) (h : p ∈ (tidy t).1.images.pending) :
     p ∈ t.images.pending := by
-  unfold tidy restart at h
+  change p ∈ (tidyRows t).1.images.pending at h
+  unfold tidyRows restart at h
   split at h
   · split at h
     · exact h
@@ -380,7 +426,8 @@ def ImagesNear : Prop :=
 theorem tidy_dead (t : State) (h : live (tidy t).1.session = false) :
     (tidy t).1.images.pending = [] ∧ (tidy t).1.rows = {} := by
   rw [(tidy_core t).session] at h
-  unfold tidy
+  change (tidyRows t).1.images.pending = [] ∧ (tidyRows t).1.rows = {}
+  unfold tidyRows
   simp only [h, Bool.false_eq_true, ↓reduceIte]
   exact ⟨trivial, trivial⟩
 
@@ -413,7 +460,8 @@ mute). -/
 def canOpenRow (s : State) (k : Nat) : Bool := live s.session && s.rows.has k && !hiddenAt s k
 
 theorem tidy_gen (t : State) : t.gen ≤ (tidy t).1.gen := by
-  unfold tidy restart
+  change t.gen ≤ (tidyRows t).1.gen
+  unfold tidyRows restart
   split
   · split
     · exact Nat.le_refl _

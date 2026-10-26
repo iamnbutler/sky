@@ -1,6 +1,6 @@
 module
 
-public import Sky.View
+public import Sky.Screen
 meta import Cairn.Claims.Elab
 
 /-! # Sky's claims
@@ -61,17 +61,31 @@ meta import Cairn.Claims.Elab
 | ^57 | invariant | a post's menu says Follow or Unfollow, Mute or Unmute, as the tables show |
 | ^58 | move | Undo a mute, in the status line |
 | ^60 | place | the notifications: a virtual list of grouped rows and the end row |
-| ^61 | move | Notifications (with the unread count): show the notifications |
-| ^62 | move | Home: back to the feed |
+| ^61 | move | Notifications, a segment with the unread count: show the notifications; again, to their top |
+| ^62 | move | Home, a segment: show the feed where it was; again, to its top |
 | ^63 | move | Refresh the notifications |
 | ^64 | move | the end of the notifications comes into view: load more |
 | ^65 | move | Retry, after loading more notifications failed |
-| ^66 | move | a row of the notifications comes into view: marked seen up to it |
+| ^66 | move | a row of the notifications: in view, marked seen up to it; pressed, opened on bsky.app |
 | ^67 | invariant | the notifications are a contiguous, newest-first run of the server's |
 | ^68 | invariant | the groups partition the notifications shown, in order; each one reason and subject |
 | ^69 | invariant | no row is from a muted account |
 | ^70 | invariant | `seenAt` never decreases and never passes a notification that hasn't been on screen |
 | ^71 | invariant | at most one unread poll, none signed out; the badge is the unread count shown |
+| ^72 | place | the Go menu |
+| ^73 | move | Go ▸ Home, ⌘1 |
+| ^74 | move | Go ▸ Notifications, ⌘2 |
+| ^75 | move | "N new" in the notifications: back to their top |
+| ^76 | move | Like a reply, mention or quote, from its row |
+| ^77 | move | Repost a reply, mention or quote, from its row |
+| ^78 | place | a notification's menu: its ⋯ button `^78#k`, and the secondary click on the row |
+| ^79 | move | Follow or Unfollow the author, in a notification's menu |
+| ^80 | move | Mute or Unmute the author, in a notification's menu |
+| ^81 | move | Copy Link to Post, in a notification's menu |
+| ^82 | move | Open on bsky.app, in a notification's menu |
+| ^83 | move | Follow back, on a follow |
+| ^84 | invariant | Home or Notifications shows; each list keeps its place while the other shows |
+| ^85 | invariant | the tab's count and the Dock badge are the unread count shown |
 -/
 
 @[expose] public section
@@ -82,13 +96,13 @@ open Cairn Cairn.Claims CairnAtproto CairnAtproto.Session
 /-! ## Places -/
 
 place ^1 window "Sky window" where
-  does "Sky's window. Signed out, the sign-in screen: handle or email, app password, service, Sign in, and what went wrong. Signed in: the home feed (Following), with Refresh and Account above it and a status line that offers new posts."
+  does "Sky's window. Signed out, the sign-in screen: handle or email, app password, service, Sign in, and what went wrong. Signed in: Home and Notifications, a segmented control (the unread count on Notifications), who is signed in and Refresh above the list shown, the home feed (Following) or the notifications, with a status line that offers new posts."
 
 place ^14 feedPlace "The feed" in ^1 where
   does "The home feed in a virtual list: one row per post (avatar, name, handle, time, the text wrapped, up to four images, Reposted by and Replying to, other embeds as a line, the counts), then the end row. Cairn owns its offset and lays only the rows near the view; the wheel, the trackpad and the page keys move it."
 
 place ^60 notesPlace "The notifications" in ^1 where
-  does "The notifications in a virtual list, newest first: likes, reposts and follows of the same post (or of you) next to each other make one row (\"Alice, Bob and 3 others liked your post\"); mentions, replies and quotes a row each; a dot on the ones newer than what is marked seen. Then the end row. The Notifications button in the header shows the unread count."
+  does "The notifications in a virtual list, newest first: likes, reposts and follows of the same post (or of you) next to each other make one row, with up to five avatars, \"Alice, Bob and 3 others liked your post\" and the post's text; replies, mentions and quotes a row each, as a post with Like, Repost and ⋯; a follow from one account has Follow back. Rows newer than what is marked seen are tinted, with a dot. Then the end row. The Notifications segment in the header shows the unread count, as the Dock's badge does."
 
 /-! ## Moves -/
 
@@ -114,11 +128,11 @@ move ^6 typeIdentifier (s : State) "Type your handle or email" in ^1 where
   on edit (op : TextOp)
     emit := s.step (.editIdentifier op)
     post s' := s'.identifier = (Text.Field.apply op s.identifier).1 ∧ s'.password = s.password
-    sound := by intro s op _; exact ⟨step1_identifier _ _, rfl⟩
+    sound := by intro s op _; exact ⟨step_editIdentifier s op, rfl⟩
   on submit
     emit := s.step .nextField
     post s' := s'.identifier = s.identifier ∧ s'.password = s.password
-    sound := by intro s _; exact ⟨step1_identifier _ _, rfl⟩
+    sound := by intro s _; exact ⟨step_nextField s, rfl⟩
 
 move ^7 typePassword (s : State) "Type your app password" in ^1 where
   does "While signed out, type in the App password field, and press Enter."
@@ -127,7 +141,7 @@ move ^7 typePassword (s : State) "Type your app password" in ^1 where
   on edit (op : TextOp)
     emit := s.step (.editPassword op)
     post s' := s'.password = (Text.SecureField.apply op s.password).1 ∧ s'.identifier = s.identifier
-    sound := by intro s op _; exact ⟨step1_password _ _, step1_identifier _ _⟩
+    sound := by intro s op _; exact ⟨step1_password _ _, step_editPassword_identifier s op⟩
   on submit
     emit := s.step .signIn
     post s' := ready s = true →
@@ -141,7 +155,7 @@ move ^8 typeService (s : State) "Type the service" in ^1 where
   on edit (op : TextOp)
     emit := s.step (.editService op)
     post s' := s'.service = (Text.Field.apply op s.service).1 ∧ s'.password = s.password
-    sound := by intro s op _; exact ⟨step1_service _ _, rfl⟩
+    sound := by intro s op _; exact ⟨step_editService s op, rfl⟩
 
 move ^9 appPasswordHelp (s : State) "What's an app password?" in ^1 where
   does "While signed out, press What's an app password?"
@@ -150,7 +164,7 @@ move ^9 appPasswordHelp (s : State) "What's an app password?" in ^1 where
   on press
     emit := s.step .openHelp
     post s' := s'.session.phase = s.session.phase ∧ s'.password = s.password
-    sound := by intro s _; exact ⟨step1_phase _ _, rfl⟩
+    sound := by intro s _; exact ⟨step_openHelp_phase s, rfl⟩
 
 move ^10 signInMove (s : State) "Sign in" in ^1 where
   does "Type a handle or email and an app password, and press Sign in. It is enabled exactly when both fields are typed in and no sign-in (or resume) is in flight."
@@ -215,7 +229,28 @@ move ^33 showNewMove (s : State) "Show new posts" in ^1 where
     sound := by intro s h; exact showNew_post (bool_left (bool_left h))
 
 place ^48 menuBarPlace "Sky's menus" in ^1 where
-  does "Sky's own items in the menu bar: Sign Out at the top of the app menu, and the View menu."
+  does "Sky's own items in the menu bar: Sign Out at the top of the app menu, the View menu and the Go menu."
+
+place ^72 goMenu "The Go menu" in ^48 where
+  does "The Go menu in the menu bar, after View: Home (⌘1) and Notifications (⌘2), the one showing checked."
+
+move ^73 goHome (s : State) "Go to Home" in ^72 where
+  does "While signed in, choose Go ▸ Home, or press ⌘1."
+  sees "As the Home segment (^62): the feed shows where it was, or, already showing, goes to its top."
+  enabled := live s.session
+  on press
+    emit := s.step .openHome
+    post s' := s'.tab = .home ∧ s'.feed = s.feed
+    sound := by intro s h; exact openHome_post h
+
+move ^74 goNotes (s : State) "Go to Notifications" in ^72 where
+  does "While signed in, choose Go ▸ Notifications, or press ⌘2."
+  sees "As the Notifications segment (^61): the notifications show where they were, or, already showing, go to their top."
+  enabled := live s.session
+  on press
+    emit := s.step .openNotes
+    post s' := s'.tab = .notifications ∧ s'.feed = s.feed
+    sound := by intro s h; exact openNotes_post h
 
 place ^50 viewMenu "The View menu" in ^48 where
   does "The View menu in the menu bar: Refresh (⌘R)."
@@ -262,22 +297,22 @@ move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^52 where
       s'.acts.muted (muteTarget s it) = !s.acts.muted (muteTarget s it)
     sound := by intro s k h it hit; exact act_post (bool_left h) it hit
 move ^61 notesTab (s : State) "Notifications" in ^1 where
-  does "While signed in, on the feed, press Notifications (it shows the unread count, if there is one)."
-  sees "The notifications show, and Sky asks for their head. Once rows have come into view, Sky marks them seen."
-  enabled := live s.session && s.tab == .home
+  does "While signed in, press Notifications in the segmented control at the top (it shows the unread count, if there is one). Pressed while the notifications show, it goes to their top."
+  sees "The notifications show where they were, selected in the control, and Sky asks for their head; the feed keeps its place (^84). Once rows have come into view, Sky marks them seen. Pressed again, the list goes to its top."
+  enabled := live s.session
   on press
     emit := s.step .openNotes
     post s' := s'.tab = .notifications ∧ s'.feed = s.feed
-    sound := by intro s h; exact openNotes_post (bool_left h)
+    sound := by intro s h; exact openNotes_post h
 
 move ^62 homeTab (s : State) "Home" in ^1 where
-  does "While the notifications show, press Home."
-  sees "The feed shows again, where it was."
-  enabled := live s.session && s.tab == .notifications
+  does "While signed in, press Home in the segmented control at the top. Pressed while the feed shows, it goes to its top."
+  sees "The feed shows again, where it was (^84), selected in the control. Pressed again, the feed goes to its top, the newest post first."
+  enabled := live s.session
   on press
     emit := s.step .openHome
     post s' := s'.tab = .home ∧ s'.feed = s.feed
-    sound := by intro s h; exact openHome_post (bool_left h)
+    sound := by intro s h; exact openHome_post h
 
 move ^63 noteRefreshMove (s : State) "Refresh the notifications" in ^1 where
   does "While the notifications show, press Refresh."
@@ -307,13 +342,92 @@ move ^65 retryNotes (s : State) "Retry loading more notifications" in ^60 where
     sound := by intro s h; exact noteMore_post (bool_left (bool_left h))
 
 move ^66 noteRowMove (s : State) (k : Nat) "A notification" in ^60 where
-  does "Scroll a row of the notifications into view."
-  sees "Sky marks the notifications seen up to the row's newest, at once on screen (the dots go), and tells the server (updateSeen) in the background; if the server refuses, the dots come back and the problem line says why."
+  does "Scroll a row of the notifications into view; or press it (or Return on it)."
+  sees "In view, Sky marks the notifications seen up to the row's newest, at once on screen (the tint and dot go), and tells the server (updateSeen) in the background; if the server refuses, they come back and the problem line says why. Pressed, what the row is about opens on bsky.app: the post liked, reposted, replied to or quoting you, or the account that followed you."
   enabled := live s.session && s.tab == .notifications && s.noteGroups.any (·.key == k)
   on appear
     emit := s.step (.noteAppear k)
     post s' := s.notes.seen.1.mark ≤ s'.notes.seen.1.mark ∧ s'.feed = s.feed
     sound := by intro s k h; exact noteAppear_post (bool_left (bool_left h)) k
+  on press
+    emit := s.step (.noteOpen k)
+    post s' := s'.feed = s.feed ∧ s'.session = s.session ∧ s'.notes = s.notes
+    sound := by intro s k h; exact noteOpen_post (bool_left (bool_left h)) k
+
+place ^78 noteMenuPlace "A notification's menu" in ^60 where
+  does "On a reply, mention or quote, the ⋯ button opens its menu (a click, Space or Return); the secondary click on the row or on its Like or Repost toggle opens the same menu. It has Follow or Unfollow and Mute or Unmute for its author, then Copy Link to Post and Open on bsky.app."
+
+move ^75 noteShowNewMove (s : State) "Show new notifications" in ^60 where
+  does "After a refresh put notifications above the row you are reading, press N new notifications in the status line."
+  sees "The notifications go back to their top, the newest first."
+  enabled := canNoteShowNew s && s.tab == .notifications
+  on press
+    emit := s.step .noteShowNew
+    post s' := s.notes.gen < s'.notes.gen ∧ s'.feed = s.feed
+    sound := by intro s h; exact noteShowNew_post (bool_left (bool_left h))
+
+move ^76 noteLikeMove (s : State) (k : Nat) "Like a notification's post" in ^60 where
+  does "While the notifications show, press the Like toggle under a reply, mention or quote."
+  sees "The post shows liked or not, and its count moves by one, in the same frame, as Like on the feed does (^37): the same likes' table, so the post shows the same on Home."
+  enabled := canNoteAct s .like k
+  on press
+    emit := s.step (.noteAct .like k)
+    post s' := ∀ p, s.notePost? k = some p → s'.acts.liked p.uri = !s.acts.liked p.uri
+    sound := by intro s k h p hp; exact noteAct_post_of h (notePost_key hp .like (Or.inl rfl))
+
+move ^77 noteRepostMove (s : State) (k : Nat) "Repost a notification's post" in ^60 where
+  does "While the notifications show, press the Repost toggle under a reply, mention or quote."
+  sees "The post shows reposted or not, and its count moves by one, in the same frame, as Repost on the feed does (^38)."
+  enabled := canNoteAct s .repost k
+  on press
+    emit := s.step (.noteAct .repost k)
+    post s' := ∀ p, s.notePost? k = some p → s'.acts.reposted p.uri = !s.acts.reposted p.uri
+    sound := by intro s k h p hp; exact noteAct_post_of h (notePost_key hp .repost (Or.inr rfl))
+
+move ^79 noteFollowMove (s : State) (k : Nat) "Follow a notification's author" in ^78 where
+  does "Open a reply's, mention's or quote's menu and choose Follow @handle (Unfollow once following)."
+  sees "The account shows followed or not everywhere, in the same frame. Sky writes the follow record, as Follow on the feed does (^39)."
+  enabled := canNoteAct s .follow k && s.notePostRow k
+  on press
+    emit := s.step (.noteAct .follow k)
+    post s' := ∀ a, s.noteAuthor? k = some a → s'.acts.following a.did = !s.acts.following a.did
+    sound := by intro s k h a ha; exact noteAct_post_of (bool_left h) (noteAuthor_key ha .follow (Or.inl rfl))
+
+move ^80 noteMuteMove (s : State) (k : Nat) "Mute a notification's author" in ^78 where
+  does "Open a reply's, mention's or quote's menu and choose Mute @handle (Unmute once muted)."
+  sees "The account's notifications are gone from the list in the same frame (^69), and its posts from the feed (^42). Sky sends muteActor, as Mute on the feed does (^40)."
+  enabled := canNoteAct s .mute k
+  on press
+    emit := s.step (.noteAct .mute k)
+    post s' := ∀ a, s.noteAuthor? k = some a → s'.acts.muted a.did = !s.acts.muted a.did
+    sound := by intro s k h a ha; exact noteAct_post_of h (noteAuthor_key ha .mute (Or.inr rfl))
+
+move ^81 noteCopyMove (s : State) (k : Nat) "Copy a notification's link" in ^78 where
+  does "Open a reply's, mention's or quote's menu and choose Copy Link to Post."
+  sees "The post's address on bsky.app is on the clipboard. Nothing else changes."
+  enabled := canNoteMenu s k
+  on press
+    emit := s.step (.noteCopy k)
+    post s' := s'.feed = s.feed ∧ s'.session = s.session ∧ s'.notes = s.notes
+    sound := by intro s k h; exact noteCopy_post (bool_left (bool_left h)) k
+
+move ^82 noteOpenMove (s : State) (k : Nat) "Open a notification on bsky.app" in ^78 where
+  does "Open a reply's, mention's or quote's menu and choose Open on bsky.app."
+  sees "The post opens on bsky.app in the browser, as pressing the row does (^66)."
+  enabled := canNoteMenu s k
+  on press
+    emit := s.step (.noteOpen k)
+    post s' := s'.feed = s.feed ∧ s'.session = s.session ∧ s'.notes = s.notes
+    sound := by intro s k h; exact noteOpen_post (bool_left (bool_left h)) k
+
+move ^83 followBackMove (s : State) (k : Nat) "Follow back" in ^60 where
+  does "On a row saying someone followed you (one account), press Follow back."
+  sees "The button says Following (checked) in the same frame, and every post by the account offers Unfollow. Sky writes the follow record, as Follow does (^39); pressed again, it unfollows."
+  enabled := canNoteAct s .follow k && !s.notePostRow k
+  on press
+    emit := s.step (.noteAct .follow k)
+    post s' := ∀ a, s.noteAuthor? k = some a → s'.acts.following a.did = !s.acts.following a.did
+    sound := by intro s k h a ha; exact noteAct_post_of (bool_left h) (noteAuthor_key ha .follow (Or.inl rfl))
 
 move ^49 signOutMenu (s : State) "Sign Out" in ^48 where
   does "While signed in, choose Sky ▸ Sign Out in the menu bar. It is greyed while signed out."
@@ -325,13 +439,23 @@ move ^49 signOutMenu (s : State) "Sign Out" in ^48 where
     sound := by intro s _; exact signOut_post s
 
 move ^51 refreshMenu (s : State) "Refresh from the View menu" in ^50 where
-  does "While signed in, choose View ▸ Refresh, or press ⌘R. It is greyed while a refresh is in flight or signed out."
-  sees "As Refresh in the header (^4): Sky asks for the head of the feed and stops any load-more in flight."
-  enabled := canRefresh s
+  does "While signed in, choose View ▸ Refresh, or press ⌘R. It refreshes the list showing, and is greyed while that list's refresh is in flight or signed out."
+  sees "As Refresh in the header: on Home (^4), Sky asks for the head of the feed and stops any load-more in flight; on Notifications (^63), for the head of the notifications."
+  enabled := canRefreshShown s
   on press
-    emit := s.step .refresh
-    post s' := s'.feed.items = s.feed.items ∧ s'.feed.loadMore = none ∧ s'.feed.refresh = some s.nextCall
-    sound := by intro s h; exact refresh_post h
+    emit := s.step (if s.tab == .home then .refresh else .noteRefresh)
+    post s' := ((s.tab == .home) = true → s'.feed.items = s.feed.items ∧ s'.feed.refresh = some s.nextCall) ∧
+      ((s.tab == .home) = false → s'.notes.list.items = s.notes.list.items ∧ s'.notes.list.refresh = some s.nextCall)
+    sound := by
+      intro s h
+      have p := refreshShown_post h
+      refine ⟨fun e => ?_, fun e => ?_⟩
+      · show (s.step (if s.tab == .home then .refresh else .noteRefresh)).1.feed.items = _ ∧
+          (s.step (if s.tab == .home then .refresh else .noteRefresh)).1.feed.refresh = _
+        simp only [e, ↓reduceIte]; exact p.1 e
+      · show (s.step (if s.tab == .home then .refresh else .noteRefresh)).1.notes.list.items = _ ∧
+          (s.step (if s.tab == .home then .refresh else .noteRefresh)).1.notes.list.refresh = _
+        simp only [e, Bool.false_eq_true, ↓reduceIte]; exact p.2 e
 
 move ^53 copyLinkMove (s : State) (k : Nat) "Copy a post's link" in ^52 where
   does "Open a post's menu and choose Copy Link to Post."
@@ -393,7 +517,18 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (noteRefreshMove.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (reachNotesEnd.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (retryNotes.preserves _ fun s _ h => hp s _ h)
-  (Move.all_cons (noteRowMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil)))))))))))))))))))))))))
+  (Move.all_cons (noteRowMove.preserves _ (fun s _ _ h => hp s _ h) fun s _ _ h => hp s _ h)
+  (Move.all_cons (goHome.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (goNotes.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (noteShowNewMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (noteLikeMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (noteRepostMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (noteFollowMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (noteMuteMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (noteCopyMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (noteOpenMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (followBackMove.preserves _ fun s _ _ h => hp s _ h)
+  Move.all_nil)))))))))))))))))))))))))))))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
@@ -650,12 +785,27 @@ invariant ^71 pollInvariant "At most one unread poll" for machine where
   step := fun s a h => ⟨update_inv (P := NotesSignedOut) notesOut_step s a h.1, pollOnce, badgeIsCount _⟩
   receive := fun s m _ => ⟨step_notesOut s (.msg m), pollOnce, badgeIsCount _⟩
 
+invariant ^84 placesInvariant "Each list keeps its place while the other shows" for machine where
+  does "Signed in, Home or Notifications shows (signed out, Home: ^71), and only that list is laid. Each list has one ref in every state (the feed's `feedRef`, the notifications' `notesRef`) and Sky keeps both (`keepScroll`), so while one shows the other's offset and what the runtime knew of its rows are kept as they were (cairn's `fixUI_keeps_offset` and `fixUI_keeps_list`, applied in `Sky.Tests.keptOffset`): switching back shows it at the same place. A list given a new generation (a refresh that replaced it, N new, its tab pressed again) is put at its top (`scrollTo … .start`) in the step it shows, hidden or not when it changed."
+  holds _s := PlacesKept
+  init := placesKept
+  step := fun _ _ _ => placesKept
+  receive := fun _ _ _ => placesKept
+
+invariant ^85 dockInvariant "The tab's count and the Dock badge are the unread count" for machine where
+  does "The Notifications segment's count and the Dock's badge are both the unread count shown (^71's `Notes.badge`, none at 0). After every step Sky has sent the Dock that count: the step's last part sets the badge whenever the count shown is not the one last sent, and then only, and says \"N unread notifications\" (low priority) when it rose. The fuzz checks the last badge the host was given against the state after every step."
+  holds s := BadgeSent s ∧ DockSends ∧ BadgeIsCount s
+  init := ⟨sent_initial, dockSends, badgeIsCount _⟩
+  step := fun s a h => ⟨update_inv (P := BadgeSent) (fun s c _ => step_sent s c) s a h.1, dockSends, badgeIsCount _⟩
+  receive := fun s m _ => ⟨step_sent s (.msg m), dockSends, badgeIsCount _⟩
+
 def claimInfos : List ClaimInfo := claims%
 
 def app : App State :=
   { machine.toApp [.window 1 "Sky" view, .menuBar 48 menuBar] claimInfos with
     initEffects
     subscriptions
-    minSize }
+    minSize
+    keepScroll := keptLists }
 
 end Sky

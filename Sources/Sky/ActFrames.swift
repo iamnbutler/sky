@@ -25,8 +25,9 @@ final class Recorder: @unchecked Sendable {
 
     init(_ engine: Engine) { self.engine = engine }
 
-    func start() {
-        lock.withLock { running = true; frames = [] }
+    /// Starts sampling; `fresh: false` goes on after a `pause`, keeping the frames so far.
+    func start(fresh: Bool = true) {
+        lock.withLock { running = true; if fresh { frames = [] } }
         let t = Thread { [self] in
             let start = Date()
             var i = 0
@@ -40,6 +41,12 @@ final class Recorder: @unchecked Sendable {
         }
         thread = t
         t.start()
+    }
+
+    /// Stops sampling for now (a cut in the video), keeping the frames.
+    func pause() {
+        lock.withLock { running = false }
+        Thread.sleep(forTimeInterval: 0.1)
     }
 
     /// Stops sampling and writes the frames as `0000.png`… under `dir`; returns how many.

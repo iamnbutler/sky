@@ -15,6 +15,27 @@ import UniformTypeIdentifiers
 // throwaway service, `cairn.sky-selftest-<uuid>`, deleted at the end whatever happens. Only items
 // this run wrote are read or deleted.
 
+/// What the frames ask the host for beyond drawing: the Dock badges and the announcements.
+final class Heard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var badges: [String?] = []
+    private var said: [String] = []
+    func take(_ p: CairnHost.Published) {
+        for e in p.frame.effects {
+            switch e {
+            case let .badge(b): lock.withLock { badges.append(b) }
+            case let .announce(t, _): lock.withLock { said.append(t) }
+            default: break
+            }
+        }
+    }
+    /// The badge last sent, `.some(nil)` for none, `nil` if never sent.
+    var badge: String?? { lock.withLock { badges.last } }
+    var announced: [String] { lock.withLock { said } }
+    /// Every badge sent, in order.
+    var sent: [String?] { lock.withLock { badges } }
+}
+
 /// The fake PDS, run with Bun on a free port of 127.0.0.1.
 final class FakePDS {
     let process = Process()
@@ -123,6 +144,7 @@ final class Selftest {
     let script: String
     let shots: URL?
     var fake: FakePDS?
+    let heard = Heard()
     let store = ThrowawayKeychain()
     var engine: Engine?
     private lazy var renderer = try? Renderer()
@@ -468,6 +490,141 @@ final class Selftest {
             + "a lost like settled by a read and made once; muting \(muted) hid their \(shownBefore) posts on screen with the reader kept, Undo brought them back"
     }
 
+    /// A row's control menu (`owner`, e.g. a notification's ⋯ ^78#k), opened by a click.
+    func menu(of owner: ControlRef) -> [MenuRecord] {
+        click(owner)
+        let end = Date().addingTimeInterval(2)
+        while Date() < end {
+            if let m = engine?.latest.flatMap({ openMenu(owner, $0.frame) }) { return m }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        fail("\(owner.label)'s menu didn't open")
+    }
+    /// The controls of claim `claim` in the frame, by key.
+    func keyed(_ claim: UInt32, _ f: Frame) -> [UInt32: AxNode] {
+        var out: [UInt32: AxNode] = [:]
+        for n in f.ax { if let c = n.control, c.claim == claim { out[c.key] = n } }
+        return out
+    }
+    /// The Go menu's Home (^73) and Notifications (^74): enabled, ⌘1 and ⌘2, which one checked.
+    func goMenu(_ f: Frame) -> (home: Bool, notes: Bool)? {
+        let m = menuBar(f)
+        guard let go = m.firstIndex(where: { $0.place == 72 && $0.label == "Go" }),
+              let h = m.first(where: { $0.control == ControlRef(claim: 73) }),
+              let n = m.first(where: { $0.control == ControlRef(claim: 74) }),
+              h.parent == go, n.parent == go, h.label == "Home", n.label == "Notifications",
+              h.enabled, n.enabled, let hc = h.checked, let nc = n.checked else { return nil }
+        return (hc, nc)
+    }
+
+    /// Notifications on screen (cairn#255): others act while the reader is on Home, so the tab's
+    /// count and the Dock badge rise, said aloud; Go ▸ Notifications (⌘2) opens the list, which
+    /// is marked seen, the count and badge going to 0; Follow back from a follow row; a like from
+    /// a reply's or mention's row; muting its author takes their rows away; Go ▸ Home (⌘1) is
+    /// back where the reader was.
+    func notesScenario(_ f: FakePDS) -> String {
+        f.control("slow?ms=0")
+        // On Home, partway down the feed.
+        click(62)
+        wheel(-200, 30)
+        wheel(40, 8)
+        var fr = until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
+        guard let g0 = goMenu(fr), g0.home, !g0.notes else { fail("no Go menu with Home checked: \(menuBar(fr).map(\.label))") }
+        let unread0 = unreadOf(fr) ?? 0
+        let said0 = heard.announced.count
+        // A repost between the follow and any older one, so the follow is a row of its own.
+        f.control("act?kind=repost&actor=5")
+        f.control("act?kind=follow&actor=1")
+        for a in 1...4 { f.control("act?kind=like&actor=\(a)") }
+        f.control("catchup")
+        // The count is polled each minute (the clock's tick).
+        fr = until(70, "the unread count didn't rise on the Notifications tab from \(unread0)") { (self.unreadOf($0) ?? 0) > unread0 && !self.busy($0) }
+        let unread = unreadOf(fr) ?? 0
+        until(2, "the Dock badge isn't the tab's count") { f in self.heard.badge == .some(String(self.unreadOf(f) ?? -1)) }
+        guard heard.announced.count > said0, heard.announced.last?.hasSuffix("unread notifications") == true else {
+            fail("the rise wasn't said: \(heard.announced.suffix(2))")
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        fr = until(5, "the feed didn't settle") { self.firstShown($0) != nil && !self.busy($0) }
+        guard let home = firstShown(fr) else { fail("no first row on Home") }
+        shot("notes-unread")
+
+        // Go ▸ Notifications (⌘2): the list, marked seen once on screen; the count and the badge go
+        // to 0 (others keep acting between requests, so new ones may come in after).
+        let sent0 = heard.sent.count
+        engine?.send([.menuSelect(place: 48, ControlRef(claim: 74))])
+        fr = until(10, "no notification rows") { f in !self.keyed(66, f).isEmpty }
+        guard let g1 = goMenu(fr), !g1.home, g1.notes else { fail("Go ▸ Notifications isn't checked once shown") }
+        until(10, "the seen time never reached the server") { _ in f.state()["seenAt"] != nil }
+        until(10, "the Dock badge and the tab's count didn't go to 0 once the notifications were seen") { _ in
+            self.heard.sent.dropFirst(sent0).contains { $0 == nil }
+        }
+        shot("notes-seen")
+
+        // Follow back from a follow row.
+        let records0 = f.records().count
+        fr = frame
+        guard let (fk, fb) = keyed(83, fr).first(where: { $0.value.label.hasPrefix("Follow back @") }) else {
+            fail("no Follow back on a follow row: \(keyed(83, fr).values.map(\.label))")
+        }
+        let who = String(fb.label.dropFirst("Follow back ".count))
+        click(ControlRef(claim: 83, key: fk))
+        until(2, "Follow back didn't show at once") { self.node(ControlRef(claim: 83, key: fk), $0)?.label == "Following " + who }
+        guard f.awaitRecords(records0 + 1) else { fail("the follow back wasn't made on the server") }
+        shot("notes-followed-back")
+
+        // A reply or mention: posts arrive until one notifies, then its Like.
+        var lk: UInt32?
+        for _ in 0..<20 {
+            fr = frame
+            if let l = listRect(fr), let k = keyed(76, fr).filter({ k, n in
+                !n.selected && n.rect.h > 0 && n.rect.y >= l.y && n.rect.y + n.rect.h <= l.y + l.h
+                    && self.node(ControlRef(claim: 78, key: k), fr).map { $0.rect.y + $0.rect.h <= l.y + l.h } == true
+            }).min(by: { $0.value.rect.y < $1.value.rect.y })?.key { lk = k; break }
+            f.control("post?n=4")
+            click(63)
+            until(10, "the notifications didn't refresh") { !self.busy($0) }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        guard let lk else { fail("no reply or mention row to like") }
+        let like = ControlRef(claim: 76, key: lk)
+        let records1 = f.records().count
+        click(like)
+        until(1, "the like didn't show at once") { self.on(like, $0) == true }
+        guard f.awaitRecords(records1 + 1) else { fail("the like from the notification wasn't made on the server") }
+        shot("notes-liked")
+
+        // Mute its author from the row's ⋯: their rows go.
+        let more = ControlRef(claim: 78, key: lk)
+        guard let ml = node(more)?.label, ml.hasPrefix("More for @"), ml.hasSuffix("'s post") else { fail("no ⋯ on the liked row") }
+        let muted = String(ml.dropFirst("More for ".count).dropLast("'s post".count))
+        let items = menu(of: more)
+        guard let mute = items.first(where: { $0.control == ControlRef(claim: 80, key: lk) }), mute.label == "Mute \(muted)",
+              items.contains(where: { $0.control == ControlRef(claim: 81, key: lk) }),
+              items.contains(where: { $0.control == ControlRef(claim: 82, key: lk) }) else {
+            fail("the notification's menu is missing an item: \(items.map(\.label))")
+        }
+        choose(mute.control!)
+        fr = until(3, "\(muted)'s notifications still show") { f in
+            self.node(ControlRef(claim: 66, key: lk), f) == nil && !self.keyed(78, f).values.contains { $0.label == "More for \(muted)'s post" }
+        }
+        let end = Date().addingTimeInterval(5)
+        while Date() < end, (f.state()["muted"] as? [Any])?.isEmpty != false { Thread.sleep(forTimeInterval: 0.1) }
+        guard (f.state()["muted"] as? [Any])?.isEmpty == false else { fail("the mute wasn't made on the server") }
+        shot("notes-muted")
+
+        // Go ▸ Home (⌘1): where the reader was.
+        engine?.send([.menuSelect(place: 48, ControlRef(claim: 73))])
+        fr = until(5, "Home didn't show") { self.firstShown($0) != nil && self.goMenu($0)?.home == true }
+        guard let back = firstShown(fr), back.key == home.key, back.y == home.y else {
+            fail("Home moved while Notifications showed: \(home) → \(String(describing: firstShown(fr)))")
+        }
+        shot("notes-home-again")
+        return "\(unread) unread on the tab and the Dock badge on Home, said aloud; Go ▸ Notifications marked them seen, "
+            + "the count and badge to 0; followed back \(who); liked a reply's post from its row; muting \(muted) took their rows away; "
+            + "Go ▸ Home back at the same row and y"
+    }
+
     func run() {
         // Files go to the scratch home, never the real one.
         guard ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] != nil else {
@@ -479,7 +636,8 @@ final class Selftest {
         let me = "@" + f.identifier
 
         // Launch: the sign-in screen, the service filled in from the default, Sign in greyed.
-        launch(f.service)
+        let heard = heard
+        launch(f.service, onPublish: { heard.take($0) })
         until(5, "no sign-in screen") { self.node(6, $0) != nil && self.node(8, $0)?.value == f.service }
         guard node(10) == nil, node(12) == nil else { fail("Sign in or Cancel offered on an empty form") }
         guard node(7)?.secure == true else { fail("the app password field isn't secure") }
@@ -578,25 +736,8 @@ final class Selftest {
         until(10, "no image drawn at the top") { self.images($0) > 0 }
         shot("feed-top")
 
-        // Notifications: others like, repost and follow; a Refresh polls the unread count onto
-        // the tab; opening it groups the likes, and the count goes once the rows are on screen.
-        for a in 1...4 { f.control("act?kind=like&actor=\(a)") }
-        f.control("act?kind=repost&actor=5")
-        f.control("act?kind=follow&actor=2")
-        f.control("catchup")
-        click(4)
-        fr = until(10, "no unread count on the Notifications tab") { (self.node(61, $0)?.label ?? "").hasPrefix("Notifications · ") }
-        let unread = unreadOf(fr) ?? 0
-        guard unread >= 6 else { fail("\(unread) unread after 6 acts") }
-        shot("feed-unread")
-        click(61)
-        until(10, "no notification rows") { f in f.ax.contains { $0.control?.claim == 66 } }
-        until(10, "the seen time never reached the server") { _ in f.state()["seenAt"] != nil }
-        shot("notifications")
-        // Others keep posting and acting between requests, so a few may be new since.
-        click(62)
-        until(10, "the unread count didn't drop once the notifications were seen") { (self.unreadOf($0) ?? 0) < unread && self.node(61, $0) != nil }
         let acts = actsScenario(f)
+        let notes = notesScenario(f)
 
         // Quit and launch again: the session resumes from the Keychain, nothing typed.
         engine?.stop()
@@ -619,7 +760,7 @@ final class Selftest {
 
         clean()
         print("selftest: PASS (Sky against the fake PDS: wrong password, rate limit, offline and slow sign-ins in words; "
-              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; notifications grouped and marked seen once shown; "
-              + "\(acts); resumed; Sign Out from the app menu forgot \(items) Keychain items and the account)")
+              + "signed in by typing; images drawn; scrolled; \(first) → \(more) posts by scrolling to the end, \(refreshed) by Refresh with the reader kept and 3 new posts offered; "
+              + "\(acts); \(notes); resumed; Sign Out from the app menu forgot \(items) Keychain items and the account)")
     }
 }

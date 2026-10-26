@@ -147,8 +147,9 @@ def relTime (now : Time) (createdAt : String) : String :=
 
 /-! ## The feed -/
 
-/-- The list's ref: a new generation is a new list, at the top. -/
-def listRef (s : State) : ControlRef := ⟨14, s.gen⟩
+/-- The feed list's ref (`feedRef`): the same in every state, so the runtime keeps the list's
+place while the notifications show; a new generation is put at the top by `dock`. -/
+def listRef (_ : State) : ControlRef := feedRef
 
 def feedList (s : State) : VList :=
   { ref := listRef s, style := { width := .fill, height := .fill, background := some white,
@@ -166,18 +167,21 @@ def displayName (p : Profile) : String :=
   | some n => if n.trimAscii.isEmpty then p.handle else n
   | none => p.handle
 
-def avatar (s : State) (p : Profile) : Node :=
+/-- An account's avatar, `size` points across: its picture, or its initial on grey. -/
+def avatarOf (s : State) (p : Profile) (size : Nat) : Node :=
   match p.avatar with
   | some src =>
-    .box { width := .fixed avatarSize, height := .fixed avatarSize, radius := avatarSize / 2,
+    .box { width := .fixed size, height := .fixed size, radius := size / 2,
            clip := true } none
-      [Node.image { source := src, width := avatarSize, height := avatarSize,
+      [Node.image { source := src, width := size, height := size,
                     state := s.images.state src }]
   | none =>
-    .box { width := .fixed avatarSize, height := .fixed avatarSize, radius := avatarSize / 2,
+    .box { width := .fixed size, height := .fixed size, radius := size / 2,
            align := .center, justify := .center, background := some line } none
-      [.text { font := { size := 16, weight := 600 }, color := white }
+      [.text { font := { size := size * 2 / 5, weight := 600 }, color := white }
         ((displayName p).take 1).toString.toUpper]
+
+def avatar (s : State) (p : Profile) : Node := avatarOf s p avatarSize
 
 /-- One image, its height from its aspect ratio (so nothing moves when it loads), capped. -/
 def imageHeight (i : CairnAtproto.Image) : Nat :=
@@ -449,29 +453,151 @@ def statusRow (s : State) (ui : UI) : Node :=
 
 /-! ## The notifications -/
 
-/-- The notifications' list. -/
-def notesList (s : State) : VList :=
-  { ref := ⟨60, s.notes.gen⟩,
+/-- The notifications' list (`notesRef`, kept like the feed's). -/
+def notesList (_ : State) : VList :=
+  { ref := notesRef,
     style := { width := .fill, height := .fill, background := some white, radius := 8, clip := true } }
 
-/-- A row: who did what, when; a dot while it is newer than what is marked seen (only the dot:
-a seen row keeps its height, so marking never moves the rows). Coming into
-view, it marks the list seen up to it (^66). -/
+def unreadTint : Color := ⟨241, 246, 255, 255⟩
+
+/-- What a row says a post did, above its text. -/
+def postReasonWords : NotificationReason → String
+  | .reply => "replied to you"
+  | .mention => "mentioned you"
+  | .quote => "quoted your post"
+  | r => reasonWords r
+
+/-- The glyph beside a group's avatars. -/
+def reasonGlyph : NotificationReason → String × Color
+  | .like => ("♥", likeRed)
+  | .repost => ("⇄", repostGreen)
+  | .follow => ("＋", accent)
+  | _ => ("•", muted)
+
+/-- The ⋯ button's ref on the notifications' row `k` (^78). -/
+def noteMoreRef (k : Nat) : ControlRef := ⟨78, k⟩
+
+/-- A reply's, mention's or quote's menu (^78): Follow or Unfollow and Mute or Unmute its author
+(as the tables show), then Copy Link to Post and Open on bsky.app. -/
+def noteMenu (s : State) (k : Nat) (a : Profile) : List MenuItem :=
+  let h := "@" ++ a.handle
+  let acct : List MenuItem :=
+    (if canNoteAct s .follow k then [.item { ref := ⟨79, k⟩, label := followWords (s.acts.following a.did) h }]
+     else []) ++
+    (if canNoteAct s .mute k then [.item { ref := ⟨80, k⟩, label := muteWords (s.acts.muted a.did) h }]
+     else [])
+  acct ++ (if acct.isEmpty then [] else [.separator]) ++
+    [.item { ref := ⟨81, k⟩, label := copyLinkWords }, .item { ref := ⟨82, k⟩, label := openWords }]
+
+/-- A toggle under a notification's post, as the feed's (`toggle`), with its own menu. -/
+def noteToggle (ui : UI) (c : Control) (glyph : String) (n : Nat) (onColor : Color)
+    (busy : Bool) (menu : List MenuItem) : Node :=
+  let on := c.checked == some true
+  .box { axis := .row, height := .fixed 22, align := .center, padding := ⟨0, 8, 0, 8⟩, radius := 11,
+         background := if ui.hover = some c.ref then some ⟨240, 240, 244, 255⟩ else none,
+         border := ring ui c.ref, menu := some { items := menu } }
+    (some c)
+    [.text { font := { size := 13, weight := if on then 600 else 400 },
+             color := if busy then greyed else if on then onColor else muted } (glyph ++ plainCount n)]
+
+/-- Like and Repost (^76, ^77) once the post's view has arrived, then ⋯ (^78). -/
+def noteActs (s : State) (ui : UI) (k : Nat) (a : Profile) : Node :=
+  let menu := noteMenu s k a
+  let toggles : List Node := match s.notePost? k with
+    | some p =>
+      (if canNoteAct s .repost k then
+        let on := s.acts.reposted p.uri
+        [noteToggle ui { ref := ⟨77, k⟩, label := "Repost, " ++ plural (s.acts.repostCount p) "repost" "reposts",
+                           checked := some on, selected := on } "⇄" (s.acts.repostCount p) repostGreen
+          (s.acts.tables.reposts.inFlight p.uri) menu] else []) ++
+      (if canNoteAct s .like k then
+        let on := s.acts.liked p.uri
+        [noteToggle ui { ref := ⟨76, k⟩, label := "Like, " ++ plural (s.acts.likeCount p) "like" "likes",
+                           checked := some on, selected := on } (if on then "♥" else "♡") (s.acts.likeCount p) likeRed
+          (s.acts.tables.likes.inFlight p.uri) menu] else [])
+    | none => []
+  .box { axis := .row, width := .fill, height := .fixed 22, gap := 18, align := .center } none
+    (toggles ++
+     [ .box { width := .fill } none [],
+       .box { height := .fixed 22, align := .center, justify := .center, padding := ⟨0, 8, 0, 8⟩, radius := 11,
+              background := if ui.menu = some (noteMoreRef k) || ui.hover = some (noteMoreRef k) then some ⟨236, 236, 240, 255⟩ else none,
+              border := ring ui (noteMoreRef k), menu := some { items := menu, button := true } }
+         (some { ref := noteMoreRef k, label := "More for @" ++ a.handle ++ "'s post" })
+         [.text { font := { size := 14, weight := 700 }, color := muted } "⋯"] ])
+
+/-- Follow back (^83) on a follow from one account: a toggle, checked as the follows' table
+shows the account. -/
+def followBack (s : State) (ui : UI) (k : Nat) (a : Profile) : List Node :=
+  if canNoteAct s .follow k then
+    let on := s.acts.following a.did
+    let r : ControlRef := ⟨83, k⟩
+    [ .box { height := .fixed 26, align := .center, justify := .center, padding := ⟨0, 12, 0, 12⟩, radius := 13,
+             corner := .continuous, background := some (if on then white else accent),
+             border := ring ui r (if on then some ⟨1, line⟩ else none) }
+        (some { ref := r, label := (if on then "Following @" else "Follow back @") ++ a.handle,
+                checked := some on, selected := on })
+        [.text { font := { size := 12, weight := 600 },
+                 color := if s.acts.tables.follows.inFlight a.did then greyed else if on then ink else white }
+          (if on then "Following" else "Follow back")] ]
+  else []
+
+/-- A row of the notifications. Its control (^66) is who did what (the avatars, up to five, and
+"Alice, Bob and 3 others liked your post", with the post's text), which opens it on bsky.app
+and, coming into view, marks the list seen up to it. A reply, mention or quote is a post, with
+Like, Repost and ⋯ under it; a follow from one account has Follow back. Unread rows are tinted,
+with a dot, until marked seen: only the colour, so marking never moves the rows. -/
 def noteRow (s : State) (ui : UI) (g : Group) : Node :=
-  let r : ControlRef := ⟨66, g.key⟩
-  let newest := newestMs g.members
-  let unseen := s.notes.seen.shown < newest
-  .box { width := .fill, background := some white, border := ring ui r }
-    (some { ref := r, role := .listItem, appear := true, label := g.words })
-    [ .box { axis := .row, width := .fill, padding := ⟨10, 14, 10, 14⟩, gap := 10, align := .center } none
-        [ .box { width := .fixed 8, height := .fixed 8, radius := 4,
-                 background := some (if unseen then accent else white) } none [],
-          .box { width := .fill, gap := 3 } none
-            [ .para { font := { size := 13, weight := 500 }, color := ink } {} g.words,
-              textLine (match g.members.head? with
-                        | some n => relTime s.now n.indexedAt
-                        | none => "") muted 12 ] ],
-      .box { width := .fill, height := .fixed 1, background := some line } none [] ]
+  let k := g.key
+  let r : ControlRef := ⟨66, k⟩
+  let unseen := s.notes.seen.shown < newestMs g.members
+  let bg : Color := if ui.hover = some r then ⟨248, 248, 250, 255⟩ else if unseen then unreadTint else white
+  let when := match g.members.head? with
+    | some n => relTime s.now n.indexedAt
+    | none => ""
+  let dot : Node := .box { width := .fixed 8, height := .fixed 8, radius := 4,
+                           background := some (if unseen then accent else bg) } none []
+  let author := (g.members.head?.map (·.author)).getD default
+  let menu : Option ControlMenu := if isPostReason g.reason then some { items := noteMenu s k author } else none
+  let body : List Node :=
+    if isPostReason g.reason then
+      [ .box { axis := .row, width := .fill, padding := ⟨12, 14, 4, 14⟩, gap := 10 } none
+          [ .box { width := .fixed 8, height := .fixed avatarSize, align := .center, justify := .center } none [dot],
+            avatar s author,
+            .box { width := .fill, gap := 4 } none
+              ([ .box { axis := .row, width := .fill, height := .fixed lineH, gap := 6, align := .center, clip := true } none
+                   [ .text { font := { size := 14, weight := 600 }, color := ink } (displayName author),
+                     .text { font := { size := 13 }, color := muted } ("@" ++ author.handle),
+                     .text { font := { size := 13 }, color := muted } ("· " ++ when) ],
+                 textLine (postReasonWords g.reason) muted 12 ] ++
+               (match (g.members.head?.bind (·.text)) with
+                | some t => if t.isEmpty then [] else [.para { font := { size := 14 }, color := ink } {} t]
+                | none => [])) ] ]
+    else
+      let (glyph, gc) := reasonGlyph g.reason
+      let subject : List Node := match g.subject.bind s.notes.post? with
+        | some p => if p.text.isEmpty then [] else [.para { font := { size := 13 }, color := muted } {} p.text]
+        | none => []
+      [ .box { axis := .row, width := .fill, padding := ⟨10, 14, 10, 14⟩, gap := 10 } none
+          [ .box { width := .fixed 8, height := .fixed 28, align := .center, justify := .center } none [dot],
+            .box { width := .fixed 22, height := .fixed 28, align := .center, justify := .center } none
+              [.text { font := { size := 16, weight := 700 }, color := gc } glyph],
+            .box { width := .fill, gap := 5 } none
+              ([ .box { axis := .row, height := .fixed 28, gap := 4, align := .center } none
+                   ((g.authors.take 5).map fun a => avatarOf s a 28),
+                 .para { font := { size := 13, weight := 500 }, color := ink } {} (g.words ++ " · " ++ when) ] ++
+               subject) ] ]
+  let acts : List Node :=
+    if isPostReason g.reason then
+      [.box { width := .fill, padding := ⟨0, 14, 8, 74⟩ } none [noteActs s ui k author]]
+    else match followBack s ui k author with
+      | [] => []
+      | b => [.box { axis := .row, width := .fill, padding := ⟨0, 14, 10, 54⟩ } none b]
+  .box { width := .fill, background := some bg } none
+    ([ .box { width := .fill, border := ring ui r, menu }
+         (some { ref := r, role := .listItem, appear := true, label := g.words })
+         body ] ++
+     acts ++
+     [ .box { width := .fill, height := .fixed 1, background := some line } none [] ])
 
 /-- The end of the notifications: loading more as it comes into view (^64), Retry after a
 failure (^65), or the end. -/
@@ -493,74 +619,86 @@ def noteEndRow (s : State) (ui : UI) : Node :=
          else "That's all.")]
 
 def noteRowOf (s : State) (ui : UI) (k : Nat) : Node :=
-  if k = 0 then noteEndRow s ui
+  if k = noteEndKey then noteEndRow s ui
   else match s.noteGroups.find? (·.key == k) with
     | some g => noteRow s ui g
     | none => .box { width := .fill, height := .fixed 1 } none []
 
-/-- The rows' keys: one per group, then the end row's `0`. -/
-def noteKeys (s : State) : Array Nat := (s.noteGroups.map Group.key ++ [0]).toArray
+/-- The rows' keys: one per group, then the end row's (`noteEndKey`). -/
+def noteKeys (s : State) : Array Nat := (s.noteGroups.map Group.key ++ [noteEndKey]).toArray
 
-/-- The unread count, on the Notifications button. -/
+/-- The unread count, on the Notifications tab (the Dock badge's, `Notes.badge`). -/
 def notesLabel (s : State) : String :=
   match s.notes.badge with
   | some n => "Notifications · " ++ n
   | none => "Notifications"
 
 def notesLine (s : State) : String :=
-  match s.problem with
-  | some p => p
-  | none => plural s.notes.list.items.length "notification" "notifications" ++
-      (if s.notes.list.refresh.isSome then " · refreshing" else "") ++
-      (if s.notes.list.loadMore.isSome then " · loading more" else "")
+  plural s.notes.list.items.length "notification" "notifications" ++
+    (if s.notes.list.refresh.isSome then " · refreshing" else "") ++
+    (if s.notes.list.loadMore.isSome then " · loading more" else "")
 
-/-- The known rows for `keys`, each hidden row (`hidden`) a point high whether laid yet or not:
-`rs` is what the runtime knew, moved to the keys' indices (`VList.align`), sorted by index. -/
-def hideRows (hidden : Nat → Bool) : List (Nat × Nat) → List VList.Row → List VList.Row
-  | [], _ => []
-  | (k, i) :: ks, rs =>
-    let rs := rs.dropWhile (·.index < i)
-    let here := match rs with
-      | r :: _ => decide (r.index = i)
-      | [] => false
-    let rest := if here then rs.drop 1 else rs
-    if hidden k then { index := i, key := k, height := 1 } :: hideRows hidden ks rest
-    else if here then rs.take 1 ++ hideRows hidden ks rest
-    else hideRows hidden ks rest
+/-- "N new" in the notifications (^75): a refresh put rows above the one at the top. -/
+def canNoteShowNew (s : State) : Bool := live s.session && s.notes.fresh != 0
 
-/-- What the feed's list is laid by: the runtime's record, with every row a mute hides known at
-the point it lays at. A mute can hide many rows at once, each recorded taller; laid by the
-record alone, the list would learn them a window at a time, a layout each, and could show a
-frame laid by heights it no longer has. Known, the list is laid right in the layout after the
-mute, and the record keeps the post being read still (`VList.record_keeps`, ^35). Until the
-runtime settles a list however many layouts it takes (cairn#276). -/
-def feedUI (s : State) (ui : UI) : UI :=
-  if s.acts.tables.mutes.size == 0 then ui else
-  let r := listRef s
-  let keys := s.rows.keys
-  let fix (k : VList.Known) : VList.Known :=
-    { k with rows := (hideRows (hiddenAt s) keys.toList.zipIdx (VList.align keys k).toList).toArray,
-             count := keys.size }
-  { ui with lists := ui.lists.map fun (x, k) => if x == r then (x, fix k) else (x, k) }
+def newNotesLabel (n : Nat) : String := if n = 1 then "1 new notification" else s!"{n} new notifications"
 
-/-- Signed in: the header (what shows, who, Refresh, the other tab), the status line and the
-list: the feed's, or the notifications'. Sign Out is in the app menu (^49). -/
+/-- The notifications' status line: "N new", then a rollback said in words, what went wrong, or
+what the list is doing. -/
+def notesStatus (s : State) (ui : UI) : Node :=
+  .box { axis := .row, width := .fill, height := .fixed 24, gap := 8, align := .center } none
+    ((if canNoteShowNew s then
+       [ .box { height := .fixed 24, padding := ⟨0, 12, 0, 12⟩, radius := 12, align := .center,
+                justify := .center, background := some accent, corner := .continuous,
+                border := ring ui ⟨75, 0⟩ } (some { ref := ⟨75, 0⟩, label := newNotesLabel s.notes.fresh })
+           [.text { font := { size := 12, weight := 600 }, color := white } ("↑ " ++ newNotesLabel s.notes.fresh)] ]
+      else []) ++
+     [ .box { width := .fill, height := .fixed lineH, clip := true } none
+         [match s.acts.line, s.problem with
+          | some l, _ => .text { font := { size := 12 }, color := alert } l
+          | none, some p => .text { font := { size := 12 }, color := alert } p
+          | none, none => .text { font := { size := 12 }, color := muted } (notesLine s)] ])
+
+/-- One of the two places, as a segment of the control that switches them (^61, ^62): selected
+when it shows. Pressed again, it goes to the top of its list. -/
+def segment (ui : UI) (claim : Nat) (label : String) (on : Bool) (count : Option String := none) : Node :=
+  let r : ControlRef := ⟨claim, 0⟩
+  .box { axis := .row, width := .hug, height := .fixed 26, radius := 6, align := .center,
+         justify := .center, gap := 6, corner := .continuous, padding := ⟨0, 12, 0, 12⟩,
+         background := if on then some white else if ui.hover = some r then some ⟨222, 222, 228, 255⟩ else none,
+         border := ring ui r (if on then some ⟨1, line⟩ else none) }
+    (some { ref := r, role := .tab, label := label ++ (match count with | some n => " · " ++ n | none => ""),
+            selected := on })
+    ([.text { font := { size := 13, weight := if on then 600 else 500 }, color := if on then ink else muted } label] ++
+     (match count with
+      | some n =>
+        [.box { height := .fixed 16, padding := ⟨0, 6, 0, 6⟩, radius := 8, align := .center, justify := .center,
+                background := some likeRed, corner := .continuous } none
+          [.text { font := { size := 11, weight := 700 }, color := white } n]]
+      | none => []))
+
+/-- Home and Notifications, the unread count on the second (the Dock badge's). -/
+def tabs (s : State) (ui : UI) : Node :=
+  .box { axis := .row, height := .fixed 30, padding := ⟨2, 2, 2, 2⟩, gap := 2, radius := 8,
+         background := some ⟨232, 232, 236, 255⟩, corner := .continuous } none
+    [ segment ui 62 "Home" (s.tab == .home),
+      segment ui 61 "Notifications" (s.tab == .notifications) s.notes.badge ]
+
+/-- Signed in: the header (Home and Notifications, who, Refresh), the status line and the list
+shown: the feed's, or the notifications'. Sign Out is in the app menu (^49). -/
 def feedView (s : State) (ui : UI) : List Node :=
   let home := s.tab == .home
   [ .box { axis := .row, width := .fill, height := .fixed 30, gap := 8, align := .center } none
-      [ .text { font := { size := 17, weight := 700 }, color := ink } (if home then "Following" else "Notifications"),
-        .box { width := .fill, height := .fixed lineH, clip := true } none
+      [ tabs s ui,
+        .box { width := .fill, height := .fixed lineH, clip := true, align := .center } none
           [.text { font := { size := 12 }, color := muted } (who s)],
         (if home then (if canRefresh s then button ui 4 "Refresh" 84 else greyButton "Refresh" 84)
-         else (if canNoteRefresh s then button ui 63 "Refresh" 84 else greyButton "Refresh" 84)),
-        (if home then button ui 61 (notesLabel s) 150 else button ui 62 "Home" 84) ] ] ++
+         else (if canNoteRefresh s then button ui 63 "Refresh" 84 else greyButton "Refresh" 84)) ] ] ++
   (if home then
     [ statusRow s ui,
-      VList.node (feedList s) (feedUI s ui) s.rows.keys (rowOf s ui) ]
+      VList.node (feedList s) ui s.rows.keys (rowOf s ui) ]
    else
-    [ .box { axis := .row, width := .fill, height := .fixed 24, align := .center } none
-        [ .box { width := .fill, height := .fixed lineH, clip := true } none
-            [.text { font := { size := 12 }, color := if s.problem.isSome then alert else muted } (notesLine s)] ],
+    [ notesStatus s ui,
       VList.node (notesList s) ui (noteKeys s) (noteRowOf s ui) ])
 
 def view (s : State) (ui : UI) : Node :=
@@ -572,13 +710,24 @@ def view (s : State) (ui : UI) : Node :=
 
 def signOutRef : ControlRef := ⟨49, 0⟩
 def refreshMenuRef : ControlRef := ⟨51, 0⟩
+def goHomeRef : ControlRef := ⟨73, 0⟩
+def goNotesRef : ControlRef := ⟨74, 0⟩
+
+/-- Refresh, for the list shown. -/
+def canRefreshShown (s : State) : Bool := if s.tab == .home then canRefresh s else canNoteRefresh s
 
 /-- Sky's own items in the menu bar (^48): Sign Out at the top of the app menu, enabled exactly
-when signed in (^56); a View menu (^50) with Refresh, ⌘R (^51). -/
+when signed in (^56); a View menu (^50) with Refresh, ⌘R (^51), for the list shown; a Go menu
+(^72) with Home, ⌘1 (^73), and Notifications, ⌘2 (^74), the one shown checked. -/
 def menuBar (s : State) : List MenuItem :=
   [ .item { ref := signOutRef, label := "Sign Out" } (enabled := live s.session),
     .submenu "View" (some 50)
-      [ .item { ref := refreshMenuRef, label := "Refresh" } (enabled := canRefresh s)
-          (shortcut := some { key := .char 'r' }) ] ]
+      [ .item { ref := refreshMenuRef, label := "Refresh" } (enabled := canRefreshShown s)
+          (shortcut := some { key := .char 'r' }) ],
+    .submenu "Go" (some 72)
+      [ .item { ref := goHomeRef, label := "Home", checked := some (s.tab == .home) }
+          (enabled := live s.session) (shortcut := some { key := .char '1' }),
+        .item { ref := goNotesRef, label := "Notifications", checked := some (s.tab == .notifications) }
+          (enabled := live s.session) (shortcut := some { key := .char '2' }) ] ]
 
 end Sky

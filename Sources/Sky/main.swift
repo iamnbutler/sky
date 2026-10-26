@@ -13,6 +13,9 @@ import Foundation
 //   Sky --act-frames <server.ts> <dir>
 //       liking and muting against the fake, its replies slowed, rendered offscreen at 30 frames
 //       a second into <dir>/like and <dir>/mute (ActFrames.swift; `make act-media`)
+//   Sky --notes-frames <server.ts> <dir>
+//       notifications arriving on Home and read, offscreen at 30 frames a second into
+//       <dir>/notes (NotesFrames.swift; `make notes-media`)
 //   Sky --bench [<server.ts>]
 //       first page, refresh, flings through 1,000 posts and memory against the fake PDS
 //       (Bench.swift, bench/README.md); `cairn bench` runs it from the package's root
@@ -44,6 +47,16 @@ if let i = CommandLine.arguments.firstIndex(of: "--act-frames") {
         exit(2)
     }
     ActFrames(server: args[i + 1], dir: args[i + 2]).run()
+    exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--notes-frames") {
+    let args = CommandLine.arguments
+    guard i + 2 < args.count else {
+        FileHandle.standardError.write(Data("notes-frames: give the fake PDS's server.ts and a directory\n".utf8))
+        exit(2)
+    }
+    NotesFrames(server: args[i + 1], dir: args[i + 2]).run()
     exit(0)
 }
 
