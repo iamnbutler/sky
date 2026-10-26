@@ -22,10 +22,10 @@ final class FakePDS {
     let identifier: String
     let password: String
 
-    init?(_ script: String) {
+    init?(_ script: String, _ extra: [String] = []) {
         let out = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["bun", script, "--port", "0", "--quiet", "--seed", "20261025"]
+        process.arguments = ["bun", script, "--port", "0", "--quiet", "--seed", "20261025"] + extra
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
@@ -169,8 +169,8 @@ final class Selftest {
     }
 
     /// Launches Sky on a fresh engine: the fake's service as the saved default, the throwaway
-    /// Keychain, loopback only.
-    func launch(_ service: String) {
+    /// Keychain, loopback only. The bench passes its own core and hears every frame.
+    func launch(_ service: String, core: (() -> AppCore)? = nil, onPublish: (@Sendable (CairnHost.Published) -> Void)? = nil) {
         var h = Handlers.standard
         h.table[14] = { r, reply in
             guard case let .readDefault(d, k) = r else { return }
@@ -183,7 +183,8 @@ final class Selftest {
         let devices = Devices(microphone: inert.microphone, keys: inert.keys, typist: inert.typist,
                               secrets: SecretSource(environment: { _ in nil }, readFile: { _ in nil }, store: store),
                               session: URLSession(configuration: c))
-        let e = Engine(size: size, scalePercent: 200, world: World(handlers: h, devices: devices)) { LeanCore(app) }
+        let e = Engine(size: size, scalePercent: 200, world: World(handlers: h, devices: devices), makeCore: core ?? { LeanCore(app) })
+        e.onPublish = onPublish
         engine = e
         e.start()
         guard e.wait(through: 0) != nil else { fail("no first frame") }

@@ -84,6 +84,9 @@ put and "3 new posts" is offered, then taken back to the top), quits and resumes
 keeps its Keychain items under a throwaway service it deletes, stops the server, and leaves
 offscreen renders of each screen in `build/shots`.
 
+`make bench` and `make bench-lean`: first page, refresh, flings through 1,000 posts, memory
+and size against the fake PDS, with the numbers in [bench/README.md](bench/README.md).
+
 `make app` builds Sky.app for release with `cairn bundle`, signs it with the first Developer ID
 Application identity in the keychain (else ad hoc) and installs it in `~/Applications`.
 
