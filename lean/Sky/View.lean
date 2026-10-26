@@ -619,13 +619,13 @@ def noteEndRow (s : State) (ui : UI) : Node :=
          else "That's all.")]
 
 def noteRowOf (s : State) (ui : UI) (k : Nat) : Node :=
-  if k = 0 then noteEndRow s ui
+  if k = noteEndKey then noteEndRow s ui
   else match s.noteGroups.find? (·.key == k) with
     | some g => noteRow s ui g
     | none => .box { width := .fill, height := .fixed 1 } none []
 
-/-- The rows' keys: one per group, then the end row's `0`. -/
-def noteKeys (s : State) : Array Nat := (s.noteGroups.map Group.key ++ [0]).toArray
+/-- The rows' keys: one per group, then the end row's (`noteEndKey`). -/
+def noteKeys (s : State) : Array Nat := (s.noteGroups.map Group.key ++ [noteEndKey]).toArray
 
 /-- The unread count, on the Notifications tab (the Dock badge's, `Notes.badge`). -/
 def notesLabel (s : State) : String :=
@@ -690,10 +690,10 @@ def feedUI (s : State) (ui : UI) : UI :=
 
 /-- One of the two places, as a segment of the control that switches them (^61, ^62): selected
 when it shows. Pressed again, it goes to the top of its list. -/
-def segment (ui : UI) (claim : Nat) (label : String) (on : Bool) (width : Nat) (count : Option String := none) : Node :=
+def segment (ui : UI) (claim : Nat) (label : String) (on : Bool) (count : Option String := none) : Node :=
   let r : ControlRef := ⟨claim, 0⟩
-  .box { axis := .row, width := .fixed width, height := .fixed 26, radius := 6, align := .center,
-         justify := .center, gap := 6, corner := .continuous,
+  .box { axis := .row, width := .hug, height := .fixed 26, radius := 6, align := .center,
+         justify := .center, gap := 6, corner := .continuous, padding := ⟨0, 12, 0, 12⟩,
          background := if on then some white else if ui.hover = some r then some ⟨222, 222, 228, 255⟩ else none,
          border := ring ui r (if on then some ⟨1, line⟩ else none) }
     (some { ref := r, role := .tab, label := label ++ (match count with | some n => " · " ++ n | none => ""),
@@ -710,8 +710,8 @@ def segment (ui : UI) (claim : Nat) (label : String) (on : Bool) (width : Nat) (
 def tabs (s : State) (ui : UI) : Node :=
   .box { axis := .row, height := .fixed 30, padding := ⟨2, 2, 2, 2⟩, gap := 2, radius := 8,
          background := some ⟨232, 232, 236, 255⟩, corner := .continuous } none
-    [ segment ui 62 "Home" (s.tab == .home) 76,
-      segment ui 61 "Notifications" (s.tab == .notifications) 148 s.notes.badge ]
+    [ segment ui 62 "Home" (s.tab == .home),
+      segment ui 61 "Notifications" (s.tab == .notifications) s.notes.badge ]
 
 /-- Signed in: the header (Home and Notifications, who, Refresh), the status line and the list
 shown: the feed's, or the notifications'. Sign Out is in the app menu (^49). -/

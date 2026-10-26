@@ -204,7 +204,8 @@ Repost, Follow back) often, and the tabs and the Go menu often enough that each 
 come back to. -/
 def weights (s : State) (r : ControlRef) : Nat :=
   if r.claim == 37 || r.claim == 38 then 6
-  else if r.claim == 76 || r.claim == 77 || r.claim == 83 then 4
+  else if r.claim == 76 || r.claim == 77 then 10
+  else if r.claim == 83 then 4
   else if r.claim == 62 || r.claim == 73 || r.claim == 74 || r.claim == 75 then 3
   else if r.claim == 39 || r.claim == 40 || r.claim == 58 then 3
   else if r.claim == 49 then (if s.acts.reqs.isEmpty && s.acts.views.isEmpty then 0 else 1)

@@ -496,11 +496,18 @@ def unreadWords (n : Nat) : String :=
   if n = 1 then "1 unread notification" else s!"{n} unread notifications"
 
 /-- What the rows of the list are keyed by: the group's oldest notification (new ones join a
-group at its top), hashed, never `0` (the end row's key). -/
+group at its top), hashed into `1 … 900000000`: never the end row's key (`noteEndKey`), and
+below the feed's keys (from `baseTop` down by the posts put on top), so no row of the two lists
+shares a key. -/
 def Group.key (g : Group) : Nat :=
   match g.members.getLast? with
-  | some n => (hash n.uri).toNat % 1000000000 + 1
+  | some n => (hash n.uri).toNat % 900000000 + 1
   | none => 1
+
+/-- The notifications' end row's key: not `0`, the feed's end row's. Cairn 0.5.1's fuzz takes a
+control keyed like any row of the list off screen for hidden (cairn#279), so the two lists'
+end rows must not share a key. -/
+def noteEndKey : Nat := 4000000000
 
 /-- A rollback, in words. -/
 def rollbackWords : Cairn.Optimistic.Reason → String
