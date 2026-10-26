@@ -70,10 +70,13 @@ theorem tidy_settle_pw (t : State) (p : Text.SecureField) :
 
 theorem step1_editPassword_snd (s : State) (op : TextOp) :
     (step1 s (.editPassword op)).2 =
-      (Text.SecureField.apply op s.password).2 ++ (settle s).2 ++ (tidy (settle s).1).2 := by
-  show (Text.SecureField.apply op s.password).2 ++
-      (settle { s with password := (Text.SecureField.apply op s.password).1 }).2 ++
-      (tidy (settle { s with password := (Text.SecureField.apply op s.password).1 }).1).2 = _
+      (Text.SecureField.apply op s.password).2 ++ (settle (clearOut s)).2 ++
+        (tidy (settle (clearOut s)).1).2 := by
+  have e : step0 (clearOut s) (.editPassword op) =
+      ({ clearOut s with password := (Text.SecureField.apply op s.password).1 },
+       (Text.SecureField.apply op s.password).2) := rfl
+  rw [step1_snd, e, flushIf_nil rfl, List.append_nil]
+  dsimp only
   rw [settle_snd, settle_snd, settle_pw, tidy_snd_pw]
 
 theorem step_blind_effects (s : State) (c : Cmd) (p : Text.SecureField) (hc : c ≠ .signIn) :
@@ -82,8 +85,9 @@ theorem step_blind_effects (s : State) (c : Cmd) (p : Text.SecureField) (hc : c 
   | signIn => exact absurd rfl hc
   | editPassword op =>
     show (step1 s (.editPassword op)).2 = (step1 { s with password := p } (.editPassword op)).2
-    rw [step1_editPassword_snd, step1_editPassword_snd, settle_snd_pw s p, tidy_settle_pw s p,
-      secure_apply_snd op s.password]
+    have e : clearOut { s with password := p } = { clearOut s with password := p } := rfl
+    rw [step1_editPassword_snd, step1_editPassword_snd, e, settle_snd_pw (clearOut s) p,
+      tidy_settle_pw (clearOut s) p, secure_apply_snd op s.password]
   | _ => rfl
 
 theorem cancelEffects_reqs (outs : List Out) : (cancelEffects outs).filterMap reqOf = [] := by
@@ -124,7 +128,8 @@ theorem tidy_reqs (s : State) : (tidy s).2.filterMap reqOf = [] := by
   obtain ⟨ids, e⟩ := tidy_snd s; rw [e]; exact cancels_reqs ids
 
 /-- The state Sign In leaves, before `settle`. -/
-def signedInTo (s : State) : State :=
+def signedInTo (s₀ : State) : State :=
+  let s := clearOut s₀
   { s with password := Text.SecureField.empty passwordHint, host := serviceOf s,
            problem := none, accountOpen := false, slow := false,
            session := { s.session with phase := .signingIn s.session.next (serviceOf s),
@@ -138,8 +143,10 @@ theorem signIn_run {s : State} (h : ready s = true) :
           (createSession (serviceOf s) (identifierOf s) s.password.text),
         .setTimer slowTimer slowMs] ++ (settle (signedInTo s)).2 ++ (tidy (settle (signedInTo s)).1).2) := by
   have hc : canSignIn s.session = true := by simp only [ready, Bool.and_eq_true] at h; exact h.2
-  simp only [step1, step0, signIn, h, ↓reduceIte, driveSession, drive, signIn_step hc, signedInTo]
-  simp [signedInEvent, handleOuts, handleOut]
+  have h' : ready (clearOut s) = true := h
+  simp only [step1, step0, signIn, h', ↓reduceIte, driveSession, drive, clearOut_session,
+    clearOut_password, serviceOf_clearOut, identifierOf_clearOut, signIn_step hc, signedInTo]
+  simp [signedInEvent, handleOuts, handleOut, flushIf, flush, clearOut]
 
 theorem ready_agree {s : State} {p : Text.SecureField} (h : s.password.Agree p) :
     ready { s with password := p } = ready s := by
@@ -161,8 +168,14 @@ theorem signIn_scrub (s : State) (p : Text.SecureField) (hp : s.password.Agree p
   · have hr' : ready { s with password := p } = false := by
       rw [ready_agree hp]; simpa using hr
     simp only [Bool.not_eq_true] at hr
-    simp only [step1, step0, signIn, hr, hr', Bool.false_eq_true, ↓reduceIte]
-    rw [settle_snd_pw s p, tidy_settle_pw s p]
+    have h0 : ready (clearOut s) = false := hr
+    have h0' : ready { clearOut s with password := p } = false := hr'
+    have e : clearOut { s with password := p } = { clearOut s with password := p } := rfl
+    rw [step1_snd, step1_snd, e]
+    simp only [step0, signIn, h0, h0', Bool.false_eq_true, ↓reduceIte]
+    rw [flushIf_nil (s := clearOut s) rfl, flushIf_nil (s := { clearOut s with password := p }) rfl]
+    dsimp only
+    rw [settle_snd_pw (clearOut s) p, tidy_settle_pw (clearOut s) p]
 
 /-- Sign In, enabled: its only request is `createSession` with the password, and the field is
 empty after. -/
@@ -175,7 +188,7 @@ theorem signIn_requests {s : State} (h : ready s = true) :
   rw [signIn_run h, List.filterMap_append, List.filterMap_append, settle_reqs, tidy_reqs]
   rfl
 
-/-- ^26: the password reaches one request. -/
+/-- ^44: the password reaches one request. -/
 def PasswordSent : Prop :=
   (∀ (s : State) (c : Cmd) (p : Text.SecureField), c ≠ .signIn →
     (s.step c).2 = ({ s with password := p }.step c).2) ∧
@@ -262,8 +275,8 @@ theorem sendOwn_noSecret (s : State) (k : Own) (r : Request) (hr : secretOf r = 
 theorem withdraw_noSecret (ss : Session.State) (l : Nat) : NoSecret (withdraw ss l).2 :=
   cancelEffects_noSecret _
 
-theorem onAnswer_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAnswer s id a).2 := by
-  unfold onAnswer
+theorem onAnswer0_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAnswer0 s id a).2 := by
+  unfold onAnswer0
   generalize readPage a = pr
   obtain ⟨page, prob⟩ := pr
   dsimp only
@@ -279,6 +292,9 @@ theorem onAnswer_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAnsw
   · split
     · exact noSecret_nil
     · exact noSecret_nil
+
+theorem onAnswer_noSecret (s : State) (id : Nat) (a : Answer) : NoSecret (onAnswer s id a).2 :=
+  onAnswer0_noSecret s id a
 
 theorem onEvent_noSecret (s : State) (e : Session.Event) : NoSecret (onEvent s e).2 := by
   cases e with
@@ -361,9 +377,6 @@ theorem secureField_noSecret (op : TextOp) (f : Text.SecureField) :
     intro e he; simp [Text.SecureField.apply] at he; subst he; rfl
   all_goals exact field_noSecret _ _
 
-theorem live_signedOut {ss : Session.State} (h : ss.phase = .signedOut) : live ss = false := by
-  simp [live, h]
-
 theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) :
     NoSecret (step0 s c).2 := by
   cases c with
@@ -395,6 +408,7 @@ theorem step0_noSecret (s : State) (c : Cmd) (h : s.session.phase = .signedOut) 
     · exact sendOwn_noSecret _ _ _ rfl
     · exact noSecret_nil
   | showNew => exact noSecret_nil
+  | act kind k => exact noSecret_nil
   | msg m =>
     simp only [step0]
     cases m with
@@ -425,8 +439,13 @@ def SignedOutNoSecret : Prop :=
 theorem signedOutNoSecret : SignedOutNoSecret := by
   intro s c h
   rcases step_cases s c with e | e <;> rw [e]
-  · exact noSecret_append (noSecret_append (step0_noSecret s c h) (settle_noSecret _)) (tidy_noSecret _)
-  · exact noSecret_append (noSecret_append (step0_noSecret s.blank c h) (settle_noSecret _))
+  · rw [step1_snd, live_signedOut h, flushIf_false, List.append_nil]
+    exact noSecret_append (noSecret_append (step0_noSecret (clearOut s) c h) (settle_noSecret _))
+      (tidy_noSecret _)
+  · have h' : s.blank.session.phase = .signedOut := h
+    show NoSecret (step1 s.blank c).2
+    rw [step1_snd, live_signedOut h', flushIf_false, List.append_nil]
+    exact noSecret_append (noSecret_append (step0_noSecret (clearOut s.blank) c h') (settle_noSecret _))
       (tidy_noSecret _)
 
 /-! ## Sign Out forgets both items -/
@@ -467,7 +486,8 @@ theorem driveSession_keeps (s : State) (i : Session.Input) :
 
 theorem signOutForgets : SignOutForgets := by
   intro s
-  let t : State := { s.blank with problem := none, accountOpen := false }
+  let s0 := clearOut s.blank
+  let t : State := { s0 with problem := none, accountOpen := false }
   have hf : ∀ item, item = accessItem ∨ item = refreshItem →
       ∃ a, Effect.request a (.forgetSecret item) ∈ (s.step .signOut).2 := by
     intro item hi
@@ -477,7 +497,8 @@ theorem signOutForgets : SignOutForgets := by
     refine ⟨sessionId (if item = accessItem then t.session.next else t.session.next + 1), ?_⟩
     show _ ∈ (step1 s.blank .signOut).2
     obtain ⟨u, hu⟩ := driveSession_keeps t .signOut
-    simp only [step1, step0, signOut]
+    rw [step1_snd]
+    apply List.mem_append_left
     apply List.mem_append_left
     apply List.mem_append_left
     apply List.mem_append_left

@@ -5,12 +5,12 @@ public import Sky.Secrets
 /-! # The rows and the images: what every step keeps
 
 * `RowsFollow`: after every step the rows are the feed's items, the keys are `top`, `top + 1`, …
-  then the end row's `0`, and `top` is never `0`, so no post's key is the end row's (^34).
+  then the end row's `0`, and `top` is never `0`, so no post's key is the end row's (^46).
 * `prepend_keeps`: posts put on top of the feed take the keys below the first; every post already
   there keeps its key and the list stays the same (`gen`), so the runtime's anchor finds the
-  reader's post where it was (^34, with Cairn's `VList.record_keeps`, ^35).
+  reader's post where it was (^46, with Cairn's `VList.record_keeps`, ^35).
 * `ImagesNear`: when a row comes into view, every image load still in flight is for a row within
-  `span` rows of it; signed out, none is, and there are no rows (^36). -/
+  `span` rows of it; signed out, none is, and there are no rows (^47). -/
 
 @[expose] public section
 
@@ -19,8 +19,8 @@ open Cairn CairnAtproto CairnAtproto.Session
 
 /-! ## The rows are untouched until `tidy` -/
 
-theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows := by
-  unfold onAnswer
+theorem onAnswer0_rows (s : State) (id : Nat) (a : Answer) : (onAnswer0 s id a).1.rows = s.rows := by
+  unfold onAnswer0
   generalize readPage a = pr
   obtain ⟨page, prob⟩ := pr
   dsimp only
@@ -32,6 +32,9 @@ theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.
         split <;> rfl
       · rfl
   · split <;> rfl
+
+theorem onAnswer_rows (s : State) (id : Nat) (a : Answer) : (onAnswer s id a).1.rows = s.rows :=
+  onAnswer0_rows s id a
 
 theorem sendOwn_rows (s : State) (k : Own) (r : Request) : (sendOwn s k r).1.rows = s.rows := rfl
 
@@ -86,6 +89,13 @@ theorem step0_rows (s : State) (c : Cmd) : (step0 s c).1.rows = s.rows := by
   | openPost k =>
     simp only [step0, Sky.openPost]
     split <;> rfl
+  | act kind k =>
+    simp only [step0, actPress]
+    split
+    · split
+      · split <;> rfl
+      · rfl
+    · rfl
   | msg m =>
     simp only [step0]
     cases m with
@@ -123,7 +133,7 @@ theorem settle_dead (s : State) (h : live (settle s).1.session = false) : (settl
   · next hl => simp only [hl, ↓reduceIte] at h; exact absurd h (by simp)
   · rfl
 
-/-! ## The rows follow the feed (^34) -/
+/-! ## The rows follow the feed (^46) -/
 
 /-- The rows as `Rows.make` builds them, from a first key that isn't the end row's. -/
 def Rows.WF (r : Rows) : Prop := r = Rows.make r.top r.items ∧ 0 < r.top
@@ -135,7 +145,7 @@ theorem baseTop_pos : 0 < baseTop := by decide
 
 theorem Rows.wf_empty : ({} : Rows).WF := ⟨rfl, baseTop_pos⟩
 
-/-- ^34's first half: the rows are the feed's items, keyed `top`, `top + 1`, … and `0` last. -/
+/-- ^46's first half: the rows are the feed's items, keyed `top`, `top + 1`, … and `0` last. -/
 def RowsFollow (s : State) : Prop := s.rows.items = s.feed.items ∧ s.rows.WF
 
 theorem change_same {old new : List FeedItem} (h : change old new = .same) : new = old := by
@@ -166,7 +176,7 @@ theorem tidy_follows (t : State) (hw : t.rows.WF) (hd : live t.session = false �
 theorem step1_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (step1 s c).1 := by
   rw [step1_fst]
   apply tidy_follows
-  · rw [settle_rows, step0_rows]; exact h
+  · rw [settle_rows, (flushIf_flushed _ _).rows, step0_rows]; exact h
   · exact settle_dead _
 
 theorem step_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (s.step c).1 := by
@@ -176,7 +186,7 @@ theorem step_follows (s : State) (c : Cmd) (h : s.rows.WF) : RowsFollow (s.step 
 
 theorem follows_initial : RowsFollow initial := ⟨rfl, Rows.wf_empty⟩
 
-/-- ^34's second half: `n` posts put on top of rows that follow the feed take the `n` keys
+/-- ^46's second half: `n` posts put on top of rows that follow the feed take the `n` keys
 below the first, every post already there keeps its key, the list stays the same, and the
 new posts are counted. -/
 def PrependKeeps : Prop :=
@@ -212,7 +222,7 @@ theorem prependKeeps : PrependKeeps := by
   rw [he, change_prepend ho hn]
   simp [hlt]
 
-/-! ## Image loads (^36) -/
+/-! ## Image loads (^47) -/
 
 theorem pending_load (t : Images) (id : Nat) (src : String) (p : Nat × String)
     (h : p ∈ (t.load id src).1.pending) : p ∈ t.pending ∨ p.2 = src := by
@@ -274,7 +284,7 @@ theorem appearRow_pending (s : State) (k i : Nat) (hi : s.rows.index? k = some i
     · next it hit => exact row_near s.rows i it hit span _ h
     · cases h
 
-/-- ^36: when the row with key `k` (row `i`) comes into view, every image load in flight is for a
+/-- ^47: when the row with key `k` (row `i`) comes into view, every image load in flight is for a
 row within `span` rows of it; and after any step that leaves Sky signed out, no load is in flight
 and there are no rows. -/
 def ImagesNear : Prop :=
@@ -299,8 +309,8 @@ theorem imagesNear : ImagesNear := by
   · have hp' : p ∈ (step1 s.blank (.appearRow k)).1.images.pending := hp
     rw [step1_fst] at hp'
     have := tidy_pending _ p hp'
-    rw [settle_images] at this
-    exact appearRow_pending s.blank k i hi p this
+    rw [settle_images, (flushIf_flushed _ _).images] at this
+    exact appearRow_pending (clearOut s.blank) k i hi p this
   · rcases step_cases s c with e | e <;> rw [e] at h ⊢
     · exact step1_dead s c h
     · exact step1_dead s.blank c h
@@ -334,8 +344,9 @@ theorem tidy_gen (t : State) : t.gen ≤ (tidy t).1.gen := by
 theorem showNew_post {s : State} (h : live s.session = true) :
     s.gen < (s.step .showNew).1.gen ∧ (s.step .showNew).1.feed = s.feed := by
   show s.gen < (step1 s.blank .showNew).1.gen ∧ (step1 s.blank .showNew).1.feed = s.feed
-  rw [step1_fst, settle_live (s := (step0 s.blank .showNew).1) h]
-  exact ⟨Nat.lt_of_lt_of_le (Nat.lt_succ_self s.gen) (tidy_gen (step0 s.blank .showNew).1),
+  rw [step1_fst, flushIf_nil (s := (step0 (clearOut s.blank) .showNew).1) rfl,
+    settle_live (s := (step0 (clearOut s.blank) .showNew).1) h]
+  exact ⟨Nat.lt_of_lt_of_le (Nat.lt_succ_self s.gen) (tidy_gen (step0 (clearOut s.blank) .showNew).1),
     (tidy_core _).feed⟩
 
 theorem openPost_core (s : State) (k : Nat) :
@@ -346,14 +357,19 @@ theorem openPost_core (s : State) (k : Nat) :
 /-- Opening a post, or a row coming into view, while signed in: the feed and the session stay. -/
 theorem openPost_post {s : State} (h : live s.session = true) (k : Nat) :
     (s.step (.openPost k)).1.feed = s.feed ∧ (s.step (.openPost k)).1.session = s.session := by
-  have c := (openPost_core s.blank k)
-  have l := step1_live (s := s.blank) (c := .openPost k) (by rw [c.1]; exact h)
+  have c := (openPost_core (clearOut s.blank) k)
+  have ho : (step0 (clearOut s.blank) (.openPost k)).1.acts.outbox = [] := by
+    simp only [step0, Sky.openPost]; split <;> rfl
+  have l := step1_live (s := s.blank) (c := .openPost k) (by rw [c.1]; exact h) ho
   exact ⟨l.feed.trans c.2, l.session.trans c.1⟩
 
 theorem appearRow_post {s : State} (h : live s.session = true) (k : Nat) :
     (s.step (.appearRow k)).1.feed = s.feed ∧ (s.step (.appearRow k)).1.session = s.session := by
-  have c := appearRow_core s.blank k
-  have l := step1_live (s := s.blank) (c := .appearRow k) (by show live (appearRow s.blank k).1.session = true; rw [c.1]; exact h)
+  have c := appearRow_core (clearOut s.blank) k
+  have ho : (step0 (clearOut s.blank) (.appearRow k)).1.acts.outbox = [] :=
+    congrArg Acts.outbox (appearRow_acts (clearOut s.blank) k)
+  have l := step1_live (s := s.blank) (c := .appearRow k)
+    (by show live (appearRow (clearOut s.blank) k).1.session = true; rw [c.1]; exact h) ho
   exact ⟨l.feed.trans c.2.1, l.session.trans c.1⟩
 
 end Sky

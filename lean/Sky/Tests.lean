@@ -170,4 +170,50 @@ def refused (r : Reply) : Option String := (run typed [.signIn, reply 0 r]).prob
 /- The link opens Bluesky's page. -/
 #guard (fresh.step .openHelp).2.any fun | .request _ (.openItem u) => u == appPasswordsUrl | _ => false
 
+/-! ## Acting (^37–^43) -/
+
+/- The first post's row, and its post. -/
+def k1 : Nat := resumed.rows.top
+def post1 : Post := ((resumed.rows.item? k1).map (·.post)).getD default
+
+/- Like: liked and counted in the same step, one putRecord out. -/
+def liking : State := run resumed [.act .like k1]
+#guard canAct resumed .like k1
+#guard !resumed.acts.liked post1.uri && liking.acts.liked post1.uri
+#guard liking.acts.likeCount post1 == resumed.acts.likeCount post1 + 1
+#guard (requests resumed (.act .like k1)).map (contains ·.2 "putRecord") == [true]
+def likeId : Nat := ((requests resumed (.act .like k1)).head?.map (·.1)).getD 0
+
+/- Acknowledged: settled, liked. -/
+#guard let s := run liking [reply likeId (json 200 (.obj [("uri", .str "at://x/y/z"), ("cid", .str "c")]))]
+  s.acts.liked post1.uri && s.acts.tables.likes.settled post1.uri
+
+/- Refused: shows what it did before, and says why. -/
+#guard let s := run liking [reply likeId (err 400 "InvalidRequest" "no")]
+  !s.acts.liked post1.uri && s.acts.line.isSome && s.acts.tables.likes.settled post1.uri
+
+/- Lost: still liked, and read back (getRecord) before it is believed; the record missing, rolled back. -/
+#guard let s := liking
+  let ids := requests s (reply likeId (.failed .timeout "timed out"))
+  ids.length == 1 && ids.all (contains ·.2 "getRecord") &&
+    (run s [reply likeId (.failed .timeout "timed out")]).acts.liked post1.uri &&
+    !(run s [reply likeId (.failed .timeout "timed out")]).acts.tables.likes.settled post1.uri &&
+    (ids.head?.map fun (id, _) =>
+      let t := run s [reply likeId (.failed .timeout "timed out"),
+                      reply id (err 400 "RecordNotFound" "Could not locate record")]
+      !t.acts.liked post1.uri && t.acts.tables.likes.settled post1.uri) == some true
+
+/- A second press while the write is out sends nothing more, and shows not liked. -/
+#guard (requests liking (.act .like k1)).isEmpty && !(run liking [.act .like k1]).acts.liked post1.uri
+
+/- Mute: every post by the author hidden at once; muteActor out; Unmute on the row. -/
+def muting : State := run resumed [.act .mute k1]
+#guard muting.acts.muted post1.author.did && hiddenItem muting ((muting.rows.item? k1).getD default)
+#guard (requests resumed (.act .mute k1)).map (contains ·.2 "muteActor") == [true]
+#guard canAct muting .mute k1 && !canAct muting .like k1
+#guard muting.rows.items.all fun it => it.post.author.did != post1.author.did || hiddenItem muting it
+
+/- Signed out: nothing held. -/
+#guard (run liking [.signOut]).acts.isEmpty
+
 end Sky.Tests

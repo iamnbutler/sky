@@ -29,15 +29,26 @@ meta import Cairn.Claims.Elab
 | ^25 | invariant | signed out ⇒ the feed is empty and nothing is in flight |
 | ^26 | invariant | the password reaches one request (retired: reissued as ^28) |
 | ^27 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^29) |
-| ^28 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
-| ^29 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^28 | invariant | the password reaches one request (retired: reissued as ^44) |
+| ^29 | invariant | Sign Out forgets both items; signed out, no secret (retired: reissued as ^45) |
 | ^30 | move | the end of the feed comes into view: load more |
 | ^31 | move | Retry, after a load-more failed |
 | ^32 | move | a post: press to open it on bsky.app; in view, its images load |
 | ^33 | move | "N new posts": back to the top |
-| ^34 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^34 | invariant | posts keep their keys (retired: reissued as ^46) |
 | ^35 | invariant | the post the reader is at stays still when rows are put above it |
-| ^36 | invariant | image loads only for rows near the view; none signed out |
+| ^36 | invariant | image loads only near the view (retired: reissued as ^47) |
+| ^37 | move | Like or Unlike a post |
+| ^38 | move | Repost or Undo repost |
+| ^39 | move | Follow or Unfollow a post's author |
+| ^40 | move | Mute a post's author, or Unmute on a hidden row |
+| ^41 | invariant | the acts' tables are calm: a settled like, repost, follow or mute shows the server's; counts through `count` |
+| ^42 | invariant | a muted account's posts appear nowhere |
+| ^43 | invariant | signed out ⇒ the acts hold nothing |
+| ^44 | invariant | the password reaches one request, redacted, and is cleared as it is sent |
+| ^45 | invariant | Sign Out forgets both Keychain items; signed out, no request carries a secret |
+| ^46 | invariant | the rows are the feed's posts; posts put on top keep every key below them |
+| ^47 | invariant | image loads only for rows near the view; none signed out |
 -/
 
 @[expose] public section
@@ -191,6 +202,45 @@ move ^33 showNewMove (s : State) "Show new posts" in ^1 where
     post s' := s.gen < s'.gen ∧ s'.feed = s.feed
     sound := by intro s h; exact showNew_post (bool_left h)
 
+move ^37 likeMove (s : State) (k : Nat) "Like a post" in ^14 where
+  does "While signed in, press Like (Unlike once liked) under a post that isn't hidden."
+  sees "The post shows liked (or not) and its like count moves by one in the same frame, everywhere it appears. Sky writes the like record (putRecord with a record key it mints, or deleteRecord); if the server refuses, the post shows what it did before and the status line says why; if the answer is lost, Sky reads the record back before it believes either."
+  enabled := canAct s .like k
+  on press
+    emit := s.step (.act .like k)
+    post s' := ∀ it, s.rows.item? k = some it → s'.acts.liked it.post.uri = !s.acts.liked it.post.uri
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^38 repostMove (s : State) (k : Nat) "Repost a post" in ^14 where
+  does "While signed in, press Repost (Undo repost once reposted) under a post that isn't hidden."
+  sees "The post shows reposted (or not) and its repost count moves by one in the same frame. The write, a refusal and a lost answer go as for Like (^37)."
+  enabled := canAct s .repost k
+  on press
+    emit := s.step (.act .repost k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.reposted it.post.uri = !s.acts.reposted it.post.uri
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^39 followMove (s : State) (k : Nat) "Follow a post's author" in ^14 where
+  does "While signed in, press Follow (Unfollow once following) under someone else's post that isn't hidden."
+  sees "Every post by that account shows Unfollow (or Follow) in the same frame. Sky writes the follow record; a refusal and a lost answer go as for Like (^37)."
+  enabled := canAct s .follow k
+  on press
+    emit := s.step (.act .follow k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.following it.post.author.did = !s.acts.following it.post.author.did
+    sound := by intro s k h it hit; exact act_post h it hit
+
+move ^40 muteMove (s : State) (k : Nat) "Mute an account" in ^14 where
+  does "While signed in, press Mute under someone else's post; on a hidden post, press Unmute."
+  sees "Muted, every post by the account, and every repost by it, is replaced by \"Post from an account you muted\" with Unmute, and a post quoting it says \"Quoted post from an account you muted\", in the same frame. Unmuted, they show again. Sky sends muteActor (or unmuteActor); a refusal shows the posts as they were and says why; a lost answer sends the same mute again until one is answered."
+  enabled := canAct s .mute k
+  on press
+    emit := s.step (.act .mute k)
+    post s' := ∀ it, s.rows.item? k = some it →
+      s'.acts.muted (muteTarget s it) = !s.acts.muted (muteTarget s it)
+    sound := by intro s k h it hit; exact act_post h it hit
+
 def machine : Machine State :=
   { init := initial, moves := moves%, receive := fun s m => s.step (.msg m) }
 
@@ -211,7 +261,11 @@ theorem moves_keep {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) :
   (Move.all_cons (reachEnd.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (retryMore.preserves _ fun s _ h => hp s _ h)
   (Move.all_cons (postRowMove.preserves _ (fun s _ _ h => hp s _ h) fun s _ _ h => hp s _ h)
-  (Move.all_cons (showNewMove.preserves _ fun s _ h => hp s _ h) Move.all_nil))))))))))))
+  (Move.all_cons (showNewMove.preserves _ fun s _ h => hp s _ h)
+  (Move.all_cons (likeMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (repostMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (followMove.preserves _ fun s _ _ h => hp s _ h)
+  (Move.all_cons (muteMove.preserves _ fun s _ _ h => hp s _ h) Move.all_nil))))))))))))))))
 
 theorem update_inv {P : State → Prop} (hp : ∀ s c, P s → P (s.step c).1) (s : State) (a : Action)
     (h : P s) : P (machine.update s a).1 := machine.preserves (moves_keep hp) s a h
@@ -244,14 +298,18 @@ retire ^26 invariant "The password reaches one request" because "Sky's step gain
 
 retire ^27 invariant "Signed out, no secret" because "Sky's step gained the feed's rows and images (cairn#211), so the statement's step is a new one: reissued as ^29."
 
-invariant ^28 passwordOnce "The password reaches one request" for machine where
+retire ^28 invariant "The password reaches one request" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^44."
+
+invariant ^44 passwordOnce "The password reaches one request" for machine where
   does "Every step but Sign in (the button, or Enter in the password field) has the same effects whatever the password field holds. Sign in's effects are the same too, for any password of the same length, once the redacted request's contents are blanked; with Sign in enabled its only request is createSession, carrying the password and marked redact, and the field is empty after. So the password is sent in exactly one request, and never shown by a tool (Cairn redacts it in dumps and logs; the fuzzer plants text in the field and checks)."
   holds _s := PasswordSent
   init := passwordSent
   step := fun _ _ _ => passwordSent
   receive := fun _ _ _ => passwordSent
 
-invariant ^29 signOutSecrets "Signed out, no secret" for machine where
+retire ^29 invariant "Signed out, no secret" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^45."
+
+invariant ^45 signOutSecrets "Signed out, no secret" for machine where
   does "Sign out's effects include forgetting both Keychain items (access and refresh). While signed out, no step sends a request carrying a Keychain secret."
   holds _s := SignOutForgets ∧ SignedOutNoSecret
   init := ⟨signOutForgets, signedOutNoSecret⟩
@@ -261,7 +319,9 @@ invariant ^29 signOutSecrets "Signed out, no secret" for machine where
 theorem rowsFollow_step (s : State) (c : Cmd) (h : RowsFollow s) : RowsFollow (s.step c).1 :=
   step_follows s c h.2
 
-invariant ^34 rowsFollow "Posts keep their keys" for machine where
+retire ^34 invariant "Posts keep their keys" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^46."
+
+invariant ^46 rowsFollow "Posts keep their keys" for machine where
   does "The rows of the list are the feed's posts in its order, keyed from a first key up, with the end row's key 0 last and never a post's. Posts a refresh puts on top take the keys below the first; every post already there keeps its key and the list stays the same one, so the reader's post is found where it was; they are counted as new posts until they come into view. A feed replaced or emptied starts a new list, at the top."
   holds s := RowsFollow s ∧ PrependKeeps
   init := ⟨follows_initial, prependKeeps⟩
@@ -286,18 +346,64 @@ theorem anchorKept : AnchorKept := fun info r pad o lim kids _ _ hk hc =>
   VList.record_keeps info r pad o lim kids hk hc
 
 invariant ^35 anchor "The post you are reading stays still" for machine where
-  does "When a refresh puts posts above the post at the top of the view (^34 keeps its key), or heights above it are corrected, the runtime moves the offset by exactly as much as that post moved, so it stays where it was on screen, unless the offset is clamped. At the very top too: the new posts land above the view, and N new posts (^33) offers them. Checked by the fuzzer at every step."
+  does "When a refresh puts posts above the post at the top of the view (^46 keeps its key), or heights above it are corrected, the runtime moves the offset by exactly as much as that post moved, so it stays where it was on screen, unless the offset is clamped. At the very top too: the new posts land above the view, and N new posts (^33) offers them. Checked by the fuzzer at every step."
   holds _s := AnchorKept
   init := anchorKept
   step := fun _ _ _ => anchorKept
   receive := fun _ _ _ => anchorKept
 
-invariant ^36 imagesNearInvariant "Image loads only near the view" for machine where
+retire ^36 invariant "Image loads only near the view" because "Sky's state gained the likes, reposts, follows and mutes, and its step sends their calls (cairn#252), so the statement's step is a new one: reissued as ^47."
+
+invariant ^47 imagesNearInvariant "Image loads only near the view" for machine where
   does "When a post comes into view, every image load still in flight is for a post within 12 rows of it: loads for posts scrolled far away are cancelled. Signed out, no image load is in flight and there are no rows. At most 6 requests are with the host at once (Cairn's maxInFlight, Runtime.step_cap)."
   holds _s := ImagesNear
   init := imagesNear
   step := fun _ _ _ => imagesNear
   receive := fun _ _ _ => imagesNear
+
+/-- ^41: the acts' tables are calm, so a key at rest shows what the server last confirmed, and a
+count shown is never less than the viewer's own part of it. -/
+def ActsSound (s : State) : Prop :=
+  s.acts.tables.Ok ∧ ∀ p : Post, Optimistic.ind (s.acts.liked p.uri) ≤ s.acts.likeCount p ∧
+    Optimistic.ind (s.acts.reposted p.uri) ≤ s.acts.repostCount p
+
+theorem actsSound (s : State) : ActsSound s :=
+  ⟨s.acts.ok, fun p => ⟨s.acts.likeCount_ge p, s.acts.repostCount_ge p⟩⟩
+
+invariant ^41 actsSettle "Likes, reposts, follows and mutes settle on the server's" for machine where
+  does "Each of likes, reposts, follows and mutes is a Cairn.Optimistic table (cairn^1100–^1114), changed only by its feed, so it is always calm: once a post's like (or any key) has no write in flight and no read-back pending, it shows what the server last confirmed, whatever order the replies came in and whichever were lost; a lost write is read back from the account's own repo (getRecord), or for a mute sent again, before it is believed. A count shown is the view's count, less the viewer's own in it, plus what is shown (Cairn.Optimistic.count), so never below the viewer's own. The fuzz drives Sky against cairn_atproto's fake server and checks that every settled key and count matches the server's."
+  holds s := ActsSound s
+  init := actsSound _
+  step := fun _ _ _ => actsSound _
+  receive := fun _ _ _ => actsSound _
+
+/-- ^42: a muted account's posts appear nowhere. -/
+def MutedHidden : Prop :=
+  (∀ (s : State) (it : FeedItem), s.acts.muted it.post.author.did = true → hiddenItem s it = true) ∧
+  (∀ (s : State) (ui : UI) (k : Nat) (it : FeedItem), k ≠ 0 → s.rows.item? k = some it →
+    hiddenItem s it = true → rowOf s ui k = mutedRow s ui k) ∧
+  (∀ (s : State) (q : QuotedPost), s.acts.muted q.author.did = true →
+    quoteLineFor s (.post q) = mutedQuote)
+
+theorem mutedHidden : MutedHidden := by
+  refine ⟨fun s it h => ?_, fun s ui k it hk hit hh => ?_, fun s q h => ?_⟩
+  · simp only [hiddenItem, h, Bool.true_or]
+  · simp only [rowOf, hk, hit, postRow, hh, ↓reduceIte]
+  · simp only [quoteLineFor, h, ↓reduceIte]
+
+invariant ^42 mutedNowhere "A muted account's posts appear nowhere" for machine where
+  does "A post whose author is muted, or a repost by a muted account, shows as one line, \"Post from an account you muted\", with Unmute: the row is built without the post (its text, images, embeds and counts are not read). A quoted post by a muted account shows as \"Quoted post from an account you muted\". Muted means as shown: a mute shows in the step it is pressed (^40)."
+  holds _s := MutedHidden
+  init := mutedHidden
+  step := fun _ _ _ => mutedHidden
+  receive := fun _ _ _ => mutedHidden
+
+invariant ^43 actsGone "Signed out, no acts held" for machine where
+  does "Whenever the session isn't signed in, Sky holds no like, repost, follow or mute, no view of a post, no act in flight and no line about one: signing out drops them, and the next account starts from its own server's."
+  holds s := ActsGone s
+  init := fun _ => rfl
+  step := fun s a h => update_inv (P := ActsGone) (fun s c _ => step_actsGone s c) s a h
+  receive := fun s m _ => step_actsGone s (.msg m)
 
 def claimInfos : List ClaimInfo := claims%
 
